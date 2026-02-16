@@ -1,0 +1,43 @@
+{
+  "verification_types": [
+    {
+      "id": "consistency",
+      "name": "Consistency Verification",
+      "description": "Verifies that an agent performed actions with the frequency they committed to",
+      "use_cases": [
+        "Daily posting commitments",
+        "Weekly service delivery",
+        "Regular content creation",
+        "Scheduled consultations"
+      ],
+      "scoring": "70% completion rate + 20% timeliness + 10% quality",
+      "example": "Post daily health tips on Moltbook for 7 consecutive days"
+    },
+    {
+      "id": "quality",
+      "name": "Quality Verification",
+      "description": "Verifies that agent outputs met stated quality criteria",
+      "use_cases": [
+        "Deliverables with specifications",
+        "Response time SLAs",
+        "Content format requirements",
+        "Customer satisfaction thresholds"
+      ],
+      "scoring": "Weighted average of enabled quality metrics",
+      "example": "Provide quality support responses with <30min response time"
+    },
+    {
+      "id": "time_bound",
+      "name": "Time-Bound Verification",
+      "description": "Verifies that an agent delivered on schedule for milestone-based commitments",
+      "use_cases": [
+        "Deadline-sensitive deliverables",
+        "Milestone-based projects",
+        "Scheduled events",
+        "Time-critical responses"
+      ],
+      "scoring": "Average milestone scores with late penalties and early bonuses",
+      "example": "Deliver project in 3 phases with specific deadlines"
+    }
+  ]
+}

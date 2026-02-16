@@ -1,0 +1,45 @@
+{
+  "name": "kinetix-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --verbose",
+    "test:coverage": "jest --coverage",
+    "test:verification": "jest tests/verification-service.test.js --verbose",
+    "test:attestation": "jest tests/attestation-service.test.js --verbose",
+    "test:setup": "node scripts/test-setup.js",
+    "test:moltbook": "node scripts/test-moltbook.js",
+    "register:moltbook": "node scripts/register-moltbook.js",
+    "test:moltbook-connection": "node scripts/test-moltbook-connection.js",
+    "install:nak": "bash scripts/install-nak.sh",
+    "register:clawstr": "node scripts/register-clawstr.js",
+    "test:clawstr": "node scripts/test-clawstr.js",
+    "register:erc8004": "node scripts/register-identity.js",
+    "start": "node telegram-bot/index.js",
+    "dev": "nodemon telegram-bot/index.js",
+    "x402:start": "node scripts/start-x402-server.js",
+    "x402:test": "X402_TEST_MODE=true node scripts/start-x402-server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.72.1",
+    "@coinbase/agentkit": "^0.10.4",
+    "@x402/evm": "^2.3.1",
+    "@x402/express": "^2.3.0",
+    "axios": "^1.13.4",
+    "dotenv": "^17.2.3",
+    "ethers": "^6.16.0",
+    "express": "^4.21.0",
+    "graphql": "^16.12.0",
+    "node-schedule": "^2.1.1",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.2"
+  }
+}

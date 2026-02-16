@@ -1,0 +1,373 @@
+{
+  "IdentityRegistry": {
+    "address": {
+      "base_mainnet": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432",
+      "base_sepolia": "0x8004AA63c570c570eBF15376c0dB199918BFe9Fb",
+      "ethereum_mainnet": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+    },
+    "abi": [
+      {
+        "inputs": [
+          {
+            "internalType": "string",
+            "name": "metadataURI",
+            "type": "string"
+          }
+        ],
+        "name": "registerAgent",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "string",
+            "name": "newURI",
+            "type": "string"
+          }
+        ],
+        "name": "updateMetadata",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          }
+        ],
+        "name": "tokenURI",
+        "outputs": [
+          {
+            "internalType": "string",
+            "name": "",
+            "type": "string"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          }
+        ],
+        "name": "ownerOf",
+        "outputs": [
+          {
+            "internalType": "address",
+            "name": "",
+            "type": "address"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [
+          {
+            "internalType": "uint256",
+            "name": "",
+            "type": "uint256"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "controller",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "metadataURI",
+            "type": "string"
+          }
+        ],
+        "name": "AgentRegistered",
+        "type": "event"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "tokenId",
+            "type": "uint256"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "oldURI",
+            "type": "string"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "newURI",
+            "type": "string"
+          }
+        ],
+        "name": "MetadataUpdated",
+        "type": "event"
+      }
+    ]
+  },
+  "ReputationRegistry": {
+    "address": {
+      "base_mainnet": "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63",
+      "base_sepolia": "0x8004bd8daB57f14Ed299135749a5CB5c42d341BF",
+      "ethereum_mainnet": "0x8004BAa17C55a88189AE136b182e5fdA19dE9b63"
+    },
+    "abi": [
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "agentTokenId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint8",
+            "name": "score",
+            "type": "uint8"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "evidenceHash",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "string",
+            "name": "category",
+            "type": "string"
+          },
+          {
+            "internalType": "bytes",
+            "name": "metadata",
+            "type": "bytes"
+          }
+        ],
+        "name": "submitReputation",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256[]",
+            "name": "agentTokenIds",
+            "type": "uint256[]"
+          },
+          {
+            "internalType": "uint8[]",
+            "name": "scores",
+            "type": "uint8[]"
+          },
+          {
+            "internalType": "bytes32[]",
+            "name": "evidenceHashes",
+            "type": "bytes32[]"
+          },
+          {
+            "internalType": "string[]",
+            "name": "categories",
+            "type": "string[]"
+          },
+          {
+            "internalType": "bytes[]",
+            "name": "metadataArray",
+            "type": "bytes[]"
+          }
+        ],
+        "name": "submitBatchReputation",
+        "outputs": [],
+        "stateMutability": "nonpayable",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "agentTokenId",
+            "type": "uint256"
+          }
+        ],
+        "name": "getReputationStats",
+        "outputs": [
+          {
+            "components": [
+              {
+                "internalType": "uint256",
+                "name": "totalEntries",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "averageScore",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "lastUpdated",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "positiveCount",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint256",
+                "name": "negativeCount",
+                "type": "uint256"
+              }
+            ],
+            "internalType": "struct ReputationStats",
+            "name": "",
+            "type": "tuple"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "inputs": [
+          {
+            "internalType": "uint256",
+            "name": "agentTokenId",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "limit",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "offset",
+            "type": "uint256"
+          }
+        ],
+        "name": "getReputationHistory",
+        "outputs": [
+          {
+            "components": [
+              {
+                "internalType": "uint256",
+                "name": "agentTokenId",
+                "type": "uint256"
+              },
+              {
+                "internalType": "address",
+                "name": "submitter",
+                "type": "address"
+              },
+              {
+                "internalType": "uint256",
+                "name": "timestamp",
+                "type": "uint256"
+              },
+              {
+                "internalType": "uint8",
+                "name": "score",
+                "type": "uint8"
+              },
+              {
+                "internalType": "bytes32",
+                "name": "evidenceHash",
+                "type": "bytes32"
+              },
+              {
+                "internalType": "string",
+                "name": "category",
+                "type": "string"
+              },
+              {
+                "internalType": "bytes",
+                "name": "metadata",
+                "type": "bytes"
+              }
+            ],
+            "internalType": "struct ReputationEntry[]",
+            "name": "",
+            "type": "tuple[]"
+          }
+        ],
+        "stateMutability": "view",
+        "type": "function"
+      },
+      {
+        "anonymous": false,
+        "inputs": [
+          {
+            "indexed": true,
+            "internalType": "uint256",
+            "name": "agentTokenId",
+            "type": "uint256"
+          },
+          {
+            "indexed": true,
+            "internalType": "address",
+            "name": "submitter",
+            "type": "address"
+          },
+          {
+            "indexed": false,
+            "internalType": "uint8",
+            "name": "score",
+            "type": "uint8"
+          },
+          {
+            "indexed": false,
+            "internalType": "bytes32",
+            "name": "evidenceHash",
+            "type": "bytes32"
+          },
+          {
+            "indexed": false,
+            "internalType": "string",
+            "name": "category",
+            "type": "string"
+          }
+        ],
+        "name": "ReputationSubmitted",
+        "type": "event"
+      }
+    ]
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "tiers": {
+    "basic": {
+      "price_usdc": "0.05",
+      "verification_types": ["consistency"],
+      "max_duration_days": 7,
+      "features": ["standard_scoring"],
+      "description": "Simple consistency verification"
+    },
+    "advanced": {
+      "price_usdc": "0.25",
+      "verification_types": ["consistency", "quality"],
+      "max_duration_days": 30,
+      "features": ["advanced_scoring", "ipfs_upload"],
+      "description": "Consistency + quality verification with IPFS"
+    },
+    "premium": {
+      "price_usdc": "1.00",
+      "verification_types": ["consistency", "quality", "time_bound"],
+      "max_duration_days": 90,
+      "features": ["all_scoring", "ipfs_upload", "erc8004_submission"],
+      "description": "Full verification suite with on-chain attestation"
+    }
+  },
+  "discount": {
+    "kinetix_payment": 0.5,
+    "description": "50% discount when paying with $KINETIX tokens"
+  },
+  "network": {
+    "base_sepolia": {
+      "chain_id": 84532,
+      "usdc_contract": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+    },
+    "base_mainnet": {
+      "chain_id": 8453,
+      "usdc_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+    }
+  }
+}

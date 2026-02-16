@@ -1,0 +1,17 @@
+{
+  "watch": [
+    "telegram-bot",
+    "services",
+    "utils",
+    "wallet",
+    "api",
+    "config",
+    "skills"
+  ],
+  "ignore": [
+    "data/",
+    "wallet-data/",
+    "*.log"
+  ],
+  "ext": "js,json"
+}

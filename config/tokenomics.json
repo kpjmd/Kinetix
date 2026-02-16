@@ -1,0 +1,24 @@
+{
+  "token": {
+    "symbol": "$KINETIX",
+    "contract_address": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+    "network": "base",
+    "chain_id": 8453,
+    "decimals": 18
+  },
+  "pricing": {
+    "verification_cost_usdc": 1.0,
+    "kinetix_discount_percent": 50,
+    "verification_cost_kinetix_equivalent": 0.5,
+    "partial_reward_percent": 50,
+    "failed_reward_percent": 0
+  },
+  "fee_capture": {
+    "swap_fee_percent": 40,
+    "description": "40% of $KINETIX trading fees flow to Kinetix wallet"
+  },
+  "reward_wallet": {
+    "note": "Rewards distributed from a SEPARATE wallet, NOT Kinetix's CDP wallet",
+    "status": "deferred_to_phase_1.5"
+  }
+}

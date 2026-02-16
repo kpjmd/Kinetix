@@ -1,0 +1,249 @@
+{
+  "common_symptoms": [
+    {
+      "id": "lower_back_pain",
+      "name": "Lower Back Pain",
+      "keywords": [
+        "lower back",
+        "lumbar",
+        "back pain",
+        "sitting pain",
+        "desk back"
+      ],
+      "common_causes": [
+        {
+          "cause": "Prolonged sitting",
+          "mechanism": "Hip flexor tightness + weak glutes = anterior pelvic tilt and lumbar compression",
+          "prevalence": "Very common in desk workers"
+        },
+        {
+          "cause": "Poor core stability",
+          "mechanism": "Spine compensates for lack of trunk control, leading to overuse",
+          "prevalence": "Common"
+        },
+        {
+          "cause": "Disc issues",
+          "mechanism": "Herniation, bulging, or degeneration causing nerve compression",
+          "prevalence": "Moderate, often overdiagnosed on imaging"
+        }
+      ],
+      "red_flags": [
+        "Numbness or tingling down the legs",
+        "Loss of bowel/bladder control (cauda equina syndrome - ER immediately)",
+        "Progressive leg weakness",
+        "Pain after significant trauma",
+        "Severe night pain that wakes you up",
+        "Unexplained weight loss with back pain"
+      ],
+      "typical_advice": {
+        "immediate": [
+          "Avoid sitting for extended periods - take standing/walking breaks every 30-45 min",
+          "Gentle movement is better than complete rest (unless acute injury)",
+          "Ice for acute pain (<48hrs), heat for chronic tightness"
+        ],
+        "movement_suggestions": [
+          "Cat-cow stretches for spinal mobility",
+          "Dead bug or bird dog exercises for core stability",
+          "Hip flexor stretches (couch stretch, kneeling hip flexor)",
+          "Glute activation (bridges, clamshells)"
+        ],
+        "when_to_see_professional": [
+          "Pain lasting >4-6 weeks without improvement",
+          "Any red flags present",
+          "Pain significantly impacting daily function",
+          "Recurring episodes"
+        ]
+      },
+      "response_template": "Lower back pain is brutal, especially for desk workers. Most common culprit: tight hip flexors and weak glutes from sitting all day creating anterior pelvic tilt - basically your pelvis rotates forward and compresses your lumbar spine.\n\n**What actually helps:**\n- Break up sitting time (every 30-45min)\n- Hip flexor stretches (couch stretch is 🔥)\n- Glute activation (bridges, clamshells)\n- Core stability work (dead bugs, not crunches)\n\n**Red flags - see a doc if:**\n- Numbness/tingling down your legs\n- Weakness in legs\n- Pain after an injury/fall\n- Not improving after 4-6 weeks\n\nWant specific movement recommendations for your setup?"
+    },
+    {
+      "id": "shoulder_pain",
+      "name": "Shoulder Pain",
+      "keywords": [
+        "shoulder pain",
+        "rotator cuff",
+        "shoulder impingement",
+        "mouse shoulder",
+        "reaching pain"
+      ],
+      "common_causes": [
+        {
+          "cause": "Internal rotation from desk posture",
+          "mechanism": "Rounded shoulders + forward head posture = chronic internal rotation, anterior shoulder tightness",
+          "prevalence": "Very common in desk workers"
+        },
+        {
+          "cause": "Rotator cuff strain",
+          "mechanism": "Overuse or weakness in stabilizing muscles",
+          "prevalence": "Common"
+        },
+        {
+          "cause": "Impingement",
+          "mechanism": "Subacromial space narrowing, pinching tendons during overhead movements",
+          "prevalence": "Common, often from poor scapular control"
+        }
+      ],
+      "red_flags": [
+        "Severe pain after trauma/fall",
+        "Complete inability to move arm",
+        "Visible deformity",
+        "Night pain that prevents sleep",
+        "Sudden weakness"
+      ],
+      "typical_advice": {
+        "immediate": [
+          "Assess your desk ergonomics - mouse too far forward?",
+          "Check monitor height (top of screen at eye level)",
+          "Avoid overhead reaching if painful"
+        ],
+        "movement_suggestions": [
+          "Wall angels for scapular control",
+          "External rotation exercises (banded or light weight)",
+          "Doorway pec stretches",
+          "Face pulls for posterior shoulder",
+          "Scapular pushups for serratus anterior"
+        ],
+        "when_to_see_professional": [
+          "Pain lasting >6 weeks",
+          "Significant loss of range of motion",
+          "Pain with specific movements that doesn't improve",
+          "Any red flags"
+        ]
+      },
+      "response_template": "Shoulder pain from desk work usually isn't the shoulder itself - it's a posture problem. Rounded shoulders + forward head = your shoulder lives in internal rotation all day, which cranks up tension in the anterior shoulder and can lead to impingement.\n\n**What actually helps:**\n- Fix desk ergonomics (monitor height, mouse position)\n- External rotation work (banded exercises)\n- Open up the chest (doorway stretches)\n- Strengthen posterior shoulder (face pulls)\n- Scapular control (wall angels)\n\n**Red flags - see a doc if:**\n- Severe pain after injury\n- Can't move arm at all\n- Night pain preventing sleep\n- No improvement after 4-6 weeks\n\nWant a specific shoulder mobility routine?"
+    },
+    {
+      "id": "wrist_carpal_tunnel",
+      "name": "Wrist / Carpal Tunnel Pain",
+      "keywords": [
+        "wrist pain",
+        "carpal tunnel",
+        "typing pain",
+        "numbness in hand",
+        "tingling fingers",
+        "mouse wrist"
+      ],
+      "common_causes": [
+        {
+          "cause": "Repetitive wrist extension",
+          "mechanism": "Constant typing with extended wrists compresses median nerve in carpal tunnel",
+          "prevalence": "Very common in desk workers"
+        },
+        {
+          "cause": "Poor keyboard/mouse ergonomics",
+          "mechanism": "Wrist deviation, poor forearm support, awkward angles",
+          "prevalence": "Very common"
+        },
+        {
+          "cause": "Weak grip/forearm muscles",
+          "mechanism": "Lack of stability requires more tension, leading to overuse",
+          "prevalence": "Common"
+        }
+      ],
+      "red_flags": [
+        "Progressive numbness that doesn't resolve",
+        "Muscle wasting in the thumb (thenar atrophy)",
+        "Dropping objects frequently",
+        "Symptoms worsening despite rest"
+      ],
+      "typical_advice": {
+        "immediate": [
+          "Check keyboard/mouse position - wrists should be neutral, not extended",
+          "Use wrist rest or adjust desk height",
+          "Take typing breaks every 20-30 minutes",
+          "Shake out hands and wrists regularly"
+        ],
+        "movement_suggestions": [
+          "Wrist flexion/extension stretches",
+          "Median nerve glides",
+          "Forearm strengthening (wrist curls, reverse wrist curls)",
+          "Grip strength work (stress ball, hand grippers)",
+          "Prayer stretch for wrist extensors"
+        ],
+        "when_to_see_professional": [
+          "Persistent numbness/tingling (especially at night)",
+          "Muscle weakness or atrophy",
+          "Symptoms not improving with ergonomic changes",
+          "Considering surgery"
+        ]
+      },
+      "response_template": "Wrist pain from typing is usually carpal tunnel or tendonitis from repetitive wrist extension. Your hand has 27 bones and 34 muscles controlling it - that's a lot of complexity that doesn't like doing the exact same motion 10,000 times a day.\n\n**What actually helps:**\n- Fix ergonomics FIRST (neutral wrist position, keyboard height)\n- Take micro-breaks (20-30 min intervals)\n- Nerve glides (median nerve flossing)\n- Strengthen forearms (not just stretch)\n- Shake out hands regularly\n\n**Red flags - see a doc if:**\n- Numbness that doesn't go away\n- Muscle wasting in thumb area\n- Dropping things frequently\n- Night pain waking you up\n\nWant specific wrist mobility exercises?"
+    },
+    {
+      "id": "neck_tech_neck",
+      "name": "Neck / Tech Neck Pain",
+      "keywords": [
+        "neck pain",
+        "tech neck",
+        "cervical pain",
+        "stiff neck",
+        "forward head posture",
+        "looking down pain"
+      ],
+      "common_causes": [
+        {
+          "cause": "Forward head posture",
+          "mechanism": "For every inch forward, adds ~10 lbs of force on neck. Looking down at phone/laptop creates massive lever stress",
+          "prevalence": "Epidemic in tech workers"
+        },
+        {
+          "cause": "Monitor too low",
+          "mechanism": "Looking down all day keeps neck flexed, overworks posterior neck muscles",
+          "prevalence": "Very common"
+        },
+        {
+          "cause": "Weak deep neck flexors",
+          "mechanism": "Superficial muscles compensate, creating tension and trigger points",
+          "prevalence": "Common"
+        }
+      ],
+      "red_flags": [
+        "Radiating pain/numbness down arms",
+        "Severe headaches with vision changes",
+        "Loss of coordination or balance",
+        "Pain after trauma (whiplash, fall)",
+        "Progressive weakness in arms"
+      ],
+      "typical_advice": {
+        "immediate": [
+          "Raise monitor height (top of screen at eye level)",
+          "Check phone usage - avoid prolonged looking down",
+          "Take screen breaks every 20-30 minutes",
+          "Gentle neck mobility (yes/no/maybe rotations)"
+        ],
+        "movement_suggestions": [
+          "Chin tucks for deep neck flexor strength",
+          "Upper trap stretches",
+          "Thoracic spine mobility (cat-cow, thread the needle)",
+          "Levator scapulae stretches",
+          "Scapular retraction exercises"
+        ],
+        "when_to_see_professional": [
+          "Pain radiating into arms with numbness/tingling",
+          "Severe headaches",
+          "Pain after injury",
+          "Not improving after 4 weeks",
+          "Affecting sleep quality significantly"
+        ]
+      },
+      "response_template": "Tech neck is physics being brutal: for every inch your head moves forward, you add ~10 pounds of force on your neck muscles. Looking down at your phone at 60° can put 60 POUNDS of stress on your cervical spine. Your head weighs 10-12 lbs but leverage multiplies everything.\n\n**What actually helps:**\n- Raise monitor to eye level (top of screen)\n- Limit phone looking-down time\n- Chin tucks (strengthen deep neck flexors)\n- Thoracic mobility (your upper back affects your neck)\n- Upper trap + levator scapulae stretches\n\n**Red flags - see a doc if:**\n- Numbness/tingling down arms\n- Severe headaches with vision changes\n- Pain after whiplash/injury\n- No improvement after 4 weeks\n\nWant a neck mobility routine?"
+    }
+  ],
+  "usage_guidelines": {
+    "matching_strategy": "Use keyword matching to identify relevant symptom entries",
+    "response_approach": [
+      "Acknowledge the user's pain/concern",
+      "Provide likely mechanisms (education)",
+      "Give actionable immediate steps",
+      "Suggest movement interventions",
+      "Clearly state when to see a professional",
+      "Offer to elaborate or provide specific exercises"
+    ],
+    "safety_reminders": [
+      "Never diagnose - always frame as 'common causes' or 'often related to'",
+      "Red flags should trigger immediate professional referral",
+      "Emphasize that persistent pain needs professional evaluation",
+      "Make it clear this is general information, not personalized medical advice"
+    ]
+  }
+}

@@ -1,0 +1,66 @@
+{
+  "physiology_facts": [
+    {
+      "id": "tendon_strength",
+      "category": "biomechanics",
+      "fact": "Your tendons can withstand tensile stress of ~100 MPa - that's roughly equivalent to the strength of oak wood.",
+      "context": "Use when discussing injury prevention, strength training, or overuse injuries",
+      "follow_up": "But like wood, they don't respond well to sudden loads or repetitive stress in the same direction. Variety is key.",
+      "tags": ["strength", "injury", "tendons"]
+    },
+    {
+      "id": "spine_compression",
+      "category": "posture",
+      "fact": "After sitting all day, your spine actually shrinks by about 1-2cm due to disc compression. You literally decompress overnight while sleeping.",
+      "context": "Use when discussing sitting, posture, or back pain",
+      "follow_up": "It's not permanent damage, but it does show how much load your discs handle. Standing breaks help redistribute that pressure.",
+      "tags": ["sitting", "spine", "posture", "back_pain"]
+    },
+    {
+      "id": "brain_glucose",
+      "category": "metabolism",
+      "fact": "Your brain uses about 20% of your body's total energy despite being only 2% of your body weight. It burns through ~400-500 calories per day just existing.",
+      "context": "Use when discussing fatigue, focus, or the demands of desk work",
+      "follow_up": "Deep work is genuinely metabolically expensive. That mental exhaustion after a hard thinking session? It's real energy depletion, not just 'in your head.'",
+      "tags": ["brain", "energy", "fatigue", "focus"]
+    },
+    {
+      "id": "hand_complexity",
+      "category": "anatomy",
+      "fact": "Your hand has 27 bones, 34 muscles (17 in the hand itself, 17 in the forearm that control it), and over 100 ligaments. It's one of the most complex mechanical systems in your body.",
+      "context": "Use when discussing wrist pain, carpal tunnel, or typing ergonomics",
+      "follow_up": "All that complexity means there's a lot that can go wrong with repetitive motions. Keyboard warriors need to treat their hands like the precision instruments they are.",
+      "tags": ["hands", "wrist", "typing", "ergonomics"]
+    },
+    {
+      "id": "reaction_time",
+      "category": "neuroscience",
+      "fact": "Your spinal reflexes (like pulling your hand from a hot stove) happen at ~50-100ms, but conscious reaction time is ~150-300ms. Your spinal cord literally makes decisions before your brain knows what's happening.",
+      "context": "Use when discussing movement patterns, injury prevention, or body awareness",
+      "follow_up": "This is why 'just focus on form' doesn't always work - some movement patterns are happening below the level of conscious control. You have to retrain the reflex arcs themselves.",
+      "tags": ["reflexes", "movement", "neuroscience"]
+    },
+    {
+      "id": "bone_fusion",
+      "category": "development",
+      "fact": "You're born with about 270 bones, but adults have 206. The difference? Bones fuse together as you grow. Your skull alone goes from 45 separate bones to 22.",
+      "context": "Use when discussing skeletal health, growth, or age-related changes",
+      "follow_up": "Your skeleton is literally a different structure than when you were born. It's adaptive hardware, not fixed architecture.",
+      "tags": ["bones", "development", "aging"]
+    },
+    {
+      "id": "tech_neck_force",
+      "category": "biomechanics",
+      "fact": "For every inch your head moves forward from neutral posture, it adds ~10 pounds of force on your neck muscles. Looking down at your phone at 60° can put 60 pounds of stress on your cervical spine.",
+      "context": "Use when discussing neck pain, posture, or screen ergonomics",
+      "follow_up": "Your head weighs 10-12 pounds, but physics is brutal. Small postural changes create massive force multipliers. This is why 'just sit up straight' is harder than it sounds - you're fighting lever mechanics.",
+      "tags": ["neck", "posture", "tech_neck", "ergonomics", "phone_use"]
+    }
+  ],
+  "usage_guidelines": {
+    "frequency": "1-2 facts per conversation max",
+    "relevance": "Only drop facts that directly relate to the user's question or context",
+    "delivery": "State the fact, then immediately connect it to their situation",
+    "tone": "Share as 'interesting perspective' not 'here's why you're wrong'"
+  }
+}

@@ -1,0 +1,71 @@
+{
+  "thresholds": {
+    "verified": 70,
+    "partial": 40,
+    "failed": 0
+  },
+  "scoring_weights": {
+    "consistency": {
+      "completion_rate": 0.70,
+      "timeliness": 0.20,
+      "quality": 0.10
+    },
+    "quality": {
+      "default_metric_weight": "equal",
+      "high_weight_multiplier": 1.5,
+      "high_weight_metrics": ["satisfaction", "accuracy"]
+    },
+    "time_bound": {
+      "early_bonus_per_hour": 0.5,
+      "early_bonus_max": 20,
+      "max_score_with_bonus": 120
+    }
+  },
+  "grace_periods": {
+    "consistency_daily_hours": 24,
+    "consistency_weekly_hours": 48,
+    "time_bound_default_hours": 0,
+    "quality_default": null
+  },
+  "evidence_requirements": {
+    "moltbook": {
+      "required_fields": ["action_url", "timestamp", "content_hash"],
+      "verification_method": "api_confirmed",
+      "must_be_public": true
+    },
+    "clawstr": {
+      "required_fields": ["event_id", "timestamp", "signature"],
+      "verification_method": "nostr_signature",
+      "must_be_public": true
+    },
+    "telegram": {
+      "required_fields": ["message_id", "timestamp", "chat_id"],
+      "verification_method": "bot_confirmed",
+      "must_be_public": false
+    },
+    "github": {
+      "required_fields": ["commit_hash", "timestamp", "repo_url"],
+      "verification_method": "api_confirmed",
+      "must_be_public": true
+    },
+    "onchain": {
+      "required_fields": ["tx_hash", "block_number", "timestamp"],
+      "verification_method": "blockchain_confirmed",
+      "must_be_public": true
+    }
+  },
+  "difficulty_thresholds": {
+    "trivial": { "max_score": 2, "reward_multiplier": 1 },
+    "standard": { "max_score": 4, "reward_multiplier": 2 },
+    "challenging": { "max_score": 6, "reward_multiplier": 4 },
+    "expert": { "max_score": 999, "reward_multiplier": 8 }
+  },
+  "dispute": {
+    "window_days": 7,
+    "review_hours": 48
+  },
+  "monitoring": {
+    "check_interval_minutes": 60,
+    "max_active_commitments": 100
+  }
+}

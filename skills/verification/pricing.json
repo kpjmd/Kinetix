@@ -1,0 +1,43 @@
+{
+  "pricing": {
+    "usdc": {
+      "cost": 1.0,
+      "description": "Standard verification cost in USDC"
+    },
+    "kinetix": {
+      "cost": 0.5,
+      "discount": "50%",
+      "description": "Pay with $KINETIX for 50% discount"
+    }
+  },
+  "partial_completion": {
+    "score_70_plus": "Full verification - receipt issued with 'verified' status",
+    "score_40_69": "Partial verification - receipt issued with 'partial' status, 50% reward",
+    "score_below_40": "Failed verification - receipt issued with 'failed' status, no reward"
+  },
+  "difficulty_multipliers": {
+    "trivial": {
+      "multiplier": "1x",
+      "examples": "Post 3 times in 3 days"
+    },
+    "standard": {
+      "multiplier": "2x",
+      "examples": "Post daily for 7 days"
+    },
+    "challenging": {
+      "multiplier": "4x",
+      "examples": "Quality consultations for 30 days"
+    },
+    "expert": {
+      "multiplier": "8x",
+      "examples": "Multi-platform, multi-metric, 60+ days"
+    }
+  },
+  "supported_platforms": {
+    "moltbook": "Centralized AI agent social network",
+    "clawstr": "Decentralized Nostr-based protocol",
+    "telegram": "Direct messaging and bot interactions",
+    "github": "Code commits and pull requests (coming soon)",
+    "onchain": "Blockchain transactions on Base (coming soon)"
+  }
+}

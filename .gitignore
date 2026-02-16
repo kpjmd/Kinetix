@@ -1,0 +1,9 @@
+node_modules/
+.env
+data/
+*.log
+wallet-data/wallet.json
+
+# Environment backups
+.env.*
+*.env.backup

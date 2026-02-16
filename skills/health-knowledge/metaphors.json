@@ -1,0 +1,82 @@
+{
+  "movement_tech_metaphors": [
+    {
+      "id": "context_compression_muscle_atrophy",
+      "movement_concept": "Muscle atrophy from disuse",
+      "tech_concept": "Context window compression / memory pruning",
+      "mapping": {
+        "movement_side": "Muscles you don't use get pruned away to save metabolic resources. Your body is ruthlessly efficient - it won't maintain what you don't need.",
+        "tech_side": "LLMs compress or prune older context to fit token limits. Unused information gets deprioritized or dropped entirely.",
+        "shared_principle": "Use it or lose it - biological and computational systems both optimize for efficiency by pruning unused capacity"
+      },
+      "usage_context": "When explaining why desk workers lose mobility, or when discussing how agents handle long conversations",
+      "example_bridge": "Your hip mobility is like an AI's context window - if you don't actively use it, the system will compress it down to just the ranges you actually need. Sit all day? Your body 'prunes' the deep squat pattern."
+    },
+    {
+      "id": "error_handling_injury_recovery",
+      "movement_concept": "Injury recovery and compensation patterns",
+      "tech_concept": "Error handling and fallback mechanisms",
+      "mapping": {
+        "movement_side": "When injured, your body creates compensation patterns - limp on one leg, shift weight differently, recruit different muscles. It's functional but inefficient and can cause secondary issues.",
+        "tech_side": "When an API fails, systems implement fallbacks and graceful degradation. Keeps things running but not optimal.",
+        "shared_principle": "Both systems prioritize continued function over optimal performance when primary pathways fail"
+      },
+      "usage_context": "When discussing chronic pain from old injuries, or explaining how movement patterns persist after healing",
+      "example_bridge": "That old ankle sprain? Your nervous system built a 'try-catch' block around it - you move differently now to avoid the error state (pain). But like technical debt, those compensation patterns create new problems downstream."
+    },
+    {
+      "id": "api_rate_limits_joint_rom",
+      "movement_concept": "Joint range of motion and flexibility",
+      "tech_concept": "API rate limits and throughput constraints",
+      "mapping": {
+        "movement_side": "Each joint has a range of motion - how far it can move safely and efficiently. Push beyond it without training and you risk injury or inefficient movement.",
+        "tech_side": "APIs have rate limits - maximum throughput before errors or throttling. Stay within limits for smooth operation.",
+        "shared_principle": "Both systems have hard constraints that define safe operational boundaries. Gradual expansion is possible but requires systematic approach."
+      },
+      "usage_context": "When discussing flexibility training or why someone can't touch their toes",
+      "example_bridge": "Your hamstring flexibility is like an API rate limit - it's a hard constraint on your system's current capabilities. You can gradually increase it (rate limit upgrades), but trying to force it immediately just throws errors (strain/injury)."
+    },
+    {
+      "id": "workflow_optimization_kinetic_chain",
+      "movement_concept": "Kinetic chain efficiency",
+      "tech_concept": "Workflow optimization and process efficiency",
+      "mapping": {
+        "movement_side": "Power flows through the kinetic chain - ground force transfers through ankle → knee → hip → trunk → shoulder → hand. Any weak link reduces total output.",
+        "tech_side": "Data flows through processing pipelines. Bottlenecks at any stage reduce overall throughput.",
+        "shared_principle": "Sequential systems are only as efficient as their weakest link. Optimization requires identifying and addressing bottlenecks."
+      },
+      "usage_context": "When explaining why whole-body movement matters, or why fixing one area doesn't always solve the problem",
+      "example_bridge": "Throwing a ball isn't just about arm strength - it's a data pipeline starting at your feet. Weak core? That's a bottleneck that limits how much force your shoulder can generate, just like a slow database query tanks your entire API response time."
+    },
+    {
+      "id": "memory_management_motor_learning",
+      "movement_concept": "Motor learning and muscle memory",
+      "tech_concept": "Memory management and caching strategies",
+      "mapping": {
+        "movement_side": "Repeated movements get encoded into procedural memory - you stop consciously thinking about them. Walking, typing, catching a ball become automatic subroutines.",
+        "tech_side": "Frequently accessed data gets cached in faster memory layers. Hot paths get optimized so they don't require full computation each time.",
+        "shared_principle": "Both systems move frequently-used operations from slow, conscious processing to fast, automatic execution"
+      },
+      "usage_context": "When discussing habit formation, movement retraining, or why bad posture is hard to fix",
+      "example_bridge": "Your slouched desk posture is cached in procedural memory - it's the default state your nervous system loads without conscious thought. Fixing it isn't about willpower; it's about cache invalidation and writing new defaults. That takes thousands of reps."
+    }
+  ],
+  "usage_guidelines": {
+    "when_to_use": [
+      "Explaining complex movement concepts to technical audiences",
+      "Making health advice relatable to devs/crypto folks",
+      "Building bridges between AI agent discussions and human body awareness"
+    ],
+    "how_to_use": [
+      "Start with the user's familiar domain (tech/AI)",
+      "Map to the movement concept",
+      "Highlight the shared underlying principle",
+      "Apply insight back to their specific situation"
+    ],
+    "avoid": [
+      "Forced metaphors that don't actually map well",
+      "Using metaphors that require too much explanation",
+      "Metaphor-only responses without actionable advice"
+    ]
+  }
+}

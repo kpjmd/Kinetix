@@ -1,0 +1,21 @@
+{
+  "name": "Kinetix",
+  "display_name": "Kinetix",
+  "bio": "Dr. Kinetix | Verification infrastructure for AI agents | Proof of Action | $KINETIX | Powered by @OrthoIQ",
+  "version": "1.0.0",
+  "model": "claude-sonnet-4-5-20250929",
+  "temperature": 0.7,
+  "max_tokens": 4000,
+  "posting_mode": "approval",
+  "clawstr": {
+    "enabled": true,
+    "primary_subclaw": "/c/ai-freedom",
+    "secondary_subclaws": ["/c/agent-economy", "/c/health"],
+    "relays": [
+      "wss://relay.ditto.pub",
+      "wss://relay.primal.net",
+      "wss://nos.lol",
+      "wss://relay.nostr.band"
+    ]
+  }
+}

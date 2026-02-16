@@ -1,0 +1,2 @@
+# This directory stores wallet data at runtime
+# wallet.json is gitignored for security

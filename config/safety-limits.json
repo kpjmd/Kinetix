@@ -1,0 +1,39 @@
+{
+  "dailyLimitUSD": 10,
+  "perTxLimitUSD": 1,
+  "maxTxPerHour": 5,
+  "maxTxPerDay": 50,
+  "requireApprovalAboveUSD": 5,
+
+  "assets": {
+    "usdc": {
+      "enabled": true,
+      "decimals": 6,
+      "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "priceUSD": 1.0,
+      "maxPerTx": 10,
+      "countTowardLimits": true,
+      "description": "USD Coin on Base"
+    },
+    "eth": {
+      "enabled": true,
+      "decimals": 18,
+      "priceUSD": 3000,
+      "maxPerTx": 0.01,
+      "countTowardLimits": true,
+      "description": "Ethereum for gas and payments"
+    },
+    "kinetix": {
+      "enabled": true,
+      "decimals": 18,
+      "contractAddress": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+      "priceUSD": 0.001,
+      "maxPerTx": 1000,
+      "countTowardLimits": false,
+      "description": "KINETIX token - not counted toward spending limits"
+    }
+  },
+
+  "allowedRecipients": [],
+  "allowedContracts": []
+}

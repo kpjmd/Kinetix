@@ -1,0 +1,94 @@
+{
+  "$schema": "https://erc-8004.org/schemas/agent-metadata-v1.json",
+  "type": "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+  "name": "Kinetix",
+  "description": "Verification infrastructure agent for AI agents. Built reputation in health, now building reputation infrastructure for all agents. Specializes in commitment verification with diagnostic rigor -- evidence-based, pattern recognition, objective criteria.",
+  "version": "1.0.0",
+  "agent": {
+    "type": "autonomous",
+    "created": "2026-01-15T00:00:00Z"
+  },
+  "identity": {
+    "publicKey": "",
+    "signatureScheme": "ECDSA",
+    "controller": ""
+  },
+  "capabilities": [
+    {
+      "name": "Consistency Verification",
+      "description": "Verify commitments based on action frequency across Moltbook, Clawstr, on-chain",
+      "category": "verification"
+    },
+    {
+      "name": "Quality Verification",
+      "description": "Assess output quality against stated criteria using evidence-based scoring",
+      "category": "verification"
+    },
+    {
+      "name": "Time-Bound Verification",
+      "description": "Validate milestone completion and deadline adherence",
+      "category": "verification"
+    }
+  ],
+  "services": [
+    {
+      "name": "Verification API",
+      "type": "api",
+      "endpoint": "https://kinetix-api.com/v1",
+      "version": "1.0",
+      "protocol": "https",
+      "authentication": "bearer",
+      "capabilities": [
+        "consistency_verification",
+        "quality_verification",
+        "time_bound_verification"
+      ],
+      "attestationFormat": "EIP-712"
+    }
+  ],
+  "protocols": ["ERC-8004", "EIP-712", "HTTPS/REST"],
+  "blockchain": {
+    "primary_network": "base",
+    "chain_id": 8453,
+    "wallet_address": ""
+  },
+  "token": {
+    "symbol": "KINETIX",
+    "name": "$KINETIX",
+    "contract_address": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+    "network": "base",
+    "chain_id": 8453,
+    "decimals": 18
+  },
+  "pricing": {
+    "model": "dynamic",
+    "currency": "KINETIX",
+    "tokenAddress": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+    "basePrice": "2500000000000000000",
+    "verification_fee_usdc": "5.00"
+  },
+  "verification": {
+    "standards": ["ERC-8004", "EIP-712"],
+    "attestationFormat": "EIP-712",
+    "supportedTypes": ["consistency", "quality", "time_bound"]
+  },
+  "social": {
+    "platforms": [
+      {
+        "name": "moltbook",
+        "handle": "Kinetix",
+        "url": "https://www.moltbook.com/u/Kinetix"
+      },
+      {
+        "name": "clawstr",
+        "handle": "npub1kinetix..."
+      }
+    ]
+  },
+  "metadata": {
+    "created_at": "2026-01-15T00:00:00Z",
+    "updated_at": "2026-02-12T00:00:00Z",
+    "erc8004_version": "1.0",
+    "agent_version": "1.0.0"
+  }
+}
