@@ -1,0 +1,19 @@
+{
+  "network": "base_mainnet",
+  "tokenId": "16892",
+  "controller": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+  "walletAddress": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+  "metadataURI": "ipfs://QmQW2mLCZW8ZDZASDq3sTcADT8iWNPZR9XyzxdqmGKn2Lb",
+  "ipfsHash": "QmQW2mLCZW8ZDZASDq3sTcADT8iWNPZR9XyzxdqmGKn2Lb",
+  "ipfsGatewayUrl": "https://gateway.pinata.cloud/ipfs/QmQW2mLCZW8ZDZASDq3sTcADT8iWNPZR9XyzxdqmGKn2Lb",
+  "txHash": "0x64cce47b38c26fcdb515b66e7e3416da061358275922fbf9be1827dffb0bfff8",
+  "blockNumber": 42037663,
+  "gasUsed": "177852",
+  "registeredAt": "2026-02-12T02:51:16.346Z",
+  "explorerUrl": "https://basescan.org/tx/0x64cce47b38c26fcdb515b66e7e3416da061358275922fbf9be1827dffb0bfff8",
+  "agentUrl": "https://8004scan.io/agent/16892",
+  "updatedAt": "2026-02-13T00:04:19.410Z",
+  "updateTxHash": "0xd3b8d8520032db7afe8769e3dc9f4a3e16c5e94e210032b0733a4333b67b1113",
+  "updateBlockNumber": 42075855,
+  "previousIpfsHash": "Qmb42i19hNCNvVhPLHJmfPnKMMCmsrxxVa8YpBRW5bzWwz"
+}

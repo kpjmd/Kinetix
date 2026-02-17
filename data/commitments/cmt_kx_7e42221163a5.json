@@ -1,0 +1,31 @@
+{
+  "commitment_id": "cmt_kx_7e42221163a5",
+  "agent_id": "test_agent",
+  "pubkey": "",
+  "platform_profiles": {},
+  "description": "Test verification",
+  "verification_type": "consistency",
+  "criteria": {
+    "frequency": "daily",
+    "duration_days": 7,
+    "minimum_actions": 1
+  },
+  "difficulty": "standard",
+  "status": "active",
+  "evidence": [],
+  "created_at": "2026-02-14T20:15:49.115Z",
+  "start_date": "2026-02-14T20:15:49.115Z",
+  "end_date": "2026-02-21T20:15:49.115Z",
+  "payment": {
+    "amount": "0.05",
+    "currency": "USDC",
+    "tier": "basic",
+    "token_used": "USDC",
+    "payment_method": "x402",
+    "x402_request_id": "unknown",
+    "network": "base_sepolia",
+    "transaction_hash": "",
+    "payment_timestamp": "2026-02-14T20:15:49.114Z"
+  },
+  "scoring_result": null
+}

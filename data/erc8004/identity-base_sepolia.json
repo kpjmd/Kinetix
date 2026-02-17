@@ -1,0 +1,20 @@
+{
+  "network": "base_sepolia",
+  "tokenId": "509",
+  "controller": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+  "walletAddress": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+  "agentURI": "ipfs://QmdDkSNeLopd6ahT862BPYT3CqgH9desbbuKYUYi7Y5n1d",
+  "ipfsHash": "QmTS6snKxY8wR9qj93ykGmgg8roZcRGCnDHR6eHNpn8M1A",
+  "ipfsGatewayUrl": "https://gateway.pinata.cloud/ipfs/QmTS6snKxY8wR9qj93ykGmgg8roZcRGCnDHR6eHNpn8M1A",
+  "txHash": "0x0f5345c48288bf647fe5c84f9bf0f7a5afac88eae5347dc590e1934bd6a74fad",
+  "blockNumber": 37547626,
+  "gasUsed": "177852",
+  "registeredAt": "2026-02-12T02:32:23Z",
+  "explorerUrl": "https://sepolia.basescan.org/tx/0x0f5345c48288bf647fe5c84f9bf0f7a5afac88eae5347dc590e1934bd6a74fad",
+  "agentUrl": "https://8004scan.io/agent/509",
+  "metadataURI": "ipfs://QmTS6snKxY8wR9qj93ykGmgg8roZcRGCnDHR6eHNpn8M1A",
+  "updatedAt": "2026-02-12T23:45:05.688Z",
+  "updateTxHash": "0xa7c4639057c557bd50ae5b6625f25024e4cd46d9e044a4b071664fbfd2a6987d",
+  "updateBlockNumber": 37585809,
+  "previousIpfsHash": "QmQAmixbGcPsdfeCAUmrSCuVsquYLPa74Am4HLCFrfrtZ7"
+}

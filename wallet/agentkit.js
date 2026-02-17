@@ -70,6 +70,16 @@ class KinetixWallet {
         }
       }
 
+      // Fallback: load wallet data from env var (for Railway where filesystem is ephemeral)
+      if (!walletData && process.env.WALLET_DATA) {
+        try {
+          walletData = JSON.parse(process.env.WALLET_DATA);
+          this._log('Loaded wallet data from WALLET_DATA env var');
+        } catch (e) {
+          this._log('Warning: WALLET_DATA env var is not valid JSON, ignoring');
+        }
+      }
+
       // Create wallet provider configuration
       const walletProviderConfig = {
         apiKeyId: process.env.CDP_API_KEY_ID,
@@ -79,6 +89,10 @@ class KinetixWallet {
 
       // Wallet secret is required for CDP managed wallets
       walletProviderConfig.walletSecret = process.env.CDP_WALLET_SECRET;
+
+      if (walletData) {
+        walletProviderConfig.cdpWalletData = walletData;
+      }
 
       // Initialize wallet provider
       this._log('Creating CdpEvmWalletProvider...');

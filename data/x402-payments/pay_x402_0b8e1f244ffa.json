@@ -1,0 +1,12 @@
+{
+  "payment_id": "pay_x402_0b8e1f244ffa",
+  "x402_request_id": "unknown",
+  "commitment_id": "cmt_kx_92b561369272",
+  "amount": "0.05",
+  "currency": "USDC",
+  "tier": "basic",
+  "status": "confirmed",
+  "transaction_hash": "",
+  "created_at": "2026-02-14T20:24:46.245Z",
+  "confirmed_at": "2026-02-14T20:24:46.245Z"
+}

@@ -1,0 +1,31 @@
+{
+  "commitment_id": "cmt_kx_64cfc4e7f416",
+  "agent_id": "test-agent-001",
+  "pubkey": "",
+  "platform_profiles": {},
+  "description": "Testing x402 integration",
+  "verification_type": "consistency",
+  "criteria": {
+    "frequency": "daily",
+    "duration_days": 7,
+    "minimum_actions": 1
+  },
+  "difficulty": "standard",
+  "status": "active",
+  "evidence": [],
+  "created_at": "2026-02-15T14:38:31.429Z",
+  "start_date": "2026-02-15T14:38:31.429Z",
+  "end_date": "2026-02-22T14:38:31.429Z",
+  "payment": {
+    "amount": "0.05",
+    "currency": "USDC",
+    "tier": "basic",
+    "token_used": "USDC",
+    "payment_method": "x402",
+    "x402_request_id": "unknown",
+    "network": "base_sepolia",
+    "transaction_hash": "",
+    "payment_timestamp": "2026-02-15T14:38:31.428Z"
+  },
+  "scoring_result": null
+}

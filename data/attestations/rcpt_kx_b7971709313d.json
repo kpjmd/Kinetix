@@ -1,0 +1,83 @@
+{
+  "receipt_version": "1.0.0",
+  "receipt_id": "rcpt_kx_b7971709313d",
+  "receipt_type": "verification_attestation",
+  "issuer": {
+    "name": "Kinetix",
+    "agent_id": "kinetix_official",
+    "pubkey": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+    "platform_profiles": {
+      "moltbook": "https://www.moltbook.com/u/Kinetix",
+      "clawstr": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5"
+    }
+  },
+  "recipient": {
+    "agent_id": "Kinetix",
+    "pubkey": "",
+    "platform_profiles": {},
+    "wallet_address": ""
+  },
+  "commitment": {
+    "commitment_id": "cmt_kx_c9bd772769ef",
+    "description": "Engage on Moltbook at least once daily for 3 days",
+    "verification_type": "consistency",
+    "criteria": {
+      "platform": "moltbook",
+      "frequency": "daily",
+      "duration_days": 3,
+      "minimum_actions": 1,
+      "action_types": [
+        "post",
+        "comment",
+        "upvote",
+        "downvote"
+      ]
+    },
+    "commitment_created_at": "2026-02-09T02:47:28.491Z",
+    "commitment_start_date": "2026-02-09T02:47:28.491Z",
+    "commitment_end_date": "2026-02-12T02:47:28.491Z"
+  },
+  "verification_result": {
+    "status": "failed",
+    "completion_rate": 0,
+    "timeliness_score": 0,
+    "quality_score": 0,
+    "overall_score": 0,
+    "days_completed": 0,
+    "days_missed": 1,
+    "evidence_count": 0
+  },
+  "evidence": [],
+  "payment": {
+    "amount": "0",
+    "currency": "USDC_EQUIVALENT",
+    "token_used": "KINETIX",
+    "network": "base",
+    "discount_applied": 0,
+    "transaction_hash": "",
+    "payment_timestamp": ""
+  },
+  "metadata": {
+    "issued_at": "2026-02-12T03:00:00.082Z",
+    "expires_at": null,
+    "kinetix_reputation_impact": 0,
+    "verification_difficulty": "trivial",
+    "dispute_window_days": 7,
+    "dispute_deadline": "2026-02-19T03:00:00.082Z",
+    "onchain_status": "pending",
+    "schema_version": "1.0.0"
+  },
+  "reputation_context": null,
+  "signatures": {
+    "receipt_hash": "sha256:320ca93e196dd3cbc781af238859875a891249d8f2bd561229f4d13c2fa97ac6",
+    "kinetix_signature": "0x230f05192c38417ba26933f88ab228743b3e023d23861753767572653a1989ba1d7165d44a98727f0d2a72d626f8a5fe784e95078821d1c9abaf0025c15f44101b",
+    "signature_algorithm": "ECDSA_secp256k1",
+    "signed_at": "2026-02-12T03:00:00.103Z",
+    "eip712_domain": {
+      "name": "KinetixProtocol",
+      "version": "1",
+      "chainId": 8453,
+      "verifyingContract": "0x0000000000000000000000000000000000000000"
+    }
+  }
+}
