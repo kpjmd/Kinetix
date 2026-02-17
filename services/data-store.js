@@ -10,6 +10,7 @@ const ATTESTATIONS_DIR = path.join(__dirname, '../data/attestations');
 const ERC8004_DIR = path.join(__dirname, '../data/erc8004');
 const REPUTATION_SUBMISSIONS_DIR = path.join(__dirname, '../data/erc8004/reputation-submissions');
 const X402_PAYMENTS_DIR = path.join(__dirname, '../data/x402-payments');
+const APPROVAL_QUEUE_DIR = path.join(__dirname, '../data/approval-queue');
 
 /**
  * Ensure data directories exist
@@ -20,6 +21,7 @@ async function ensureDirectories() {
   await fs.mkdir(ERC8004_DIR, { recursive: true });
   await fs.mkdir(REPUTATION_SUBMISSIONS_DIR, { recursive: true });
   await fs.mkdir(X402_PAYMENTS_DIR, { recursive: true });
+  await fs.mkdir(APPROVAL_QUEUE_DIR, { recursive: true });
   console.log('[DataStore] Directories initialized');
 }
 
