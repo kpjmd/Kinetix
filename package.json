@@ -12,6 +12,7 @@
     "test:moltbook": "node scripts/test-moltbook.js",
     "register:moltbook": "node scripts/register-moltbook.js",
     "test:moltbook-connection": "node scripts/test-moltbook-connection.js",
+    "postinstall": "bash scripts/install-nak-railway.sh || echo '[NAK] Skipping NAK install (optional)'",
     "install:nak": "bash scripts/install-nak.sh",
     "register:clawstr": "node scripts/register-clawstr.js",
     "test:clawstr": "node scripts/test-clawstr.js",

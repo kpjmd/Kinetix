@@ -32,12 +32,16 @@ const CONFIG = {
  * Load the Nostr secret key from file
  */
 async function loadSecretKey() {
+  // Support inline env var for Railway/cloud deployments (no filesystem key)
+  if (process.env.CLAWSTR_SECRET_KEY) {
+    return process.env.CLAWSTR_SECRET_KEY.trim();
+  }
   try {
     const expandedPath = CONFIG.secretKeyPath.replace(/^~/, os.homedir());
     const secretKey = await fs.readFile(expandedPath, 'utf-8');
     return secretKey.trim();
   } catch (error) {
-    throw new Error(`Failed to load secret key from ${CONFIG.secretKeyPath}: ${error.message}`);
+    throw new Error(`Failed to load secret key. Set CLAWSTR_SECRET_KEY env var or CLAWSTR_SECRET_KEY_PATH. Error: ${error.message}`);
   }
 }
 
