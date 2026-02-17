@@ -5,7 +5,7 @@
 
 set -e
 
-NAK_VERSION="v0.7.12"
+NAK_VERSION="v0.18.4"
 INSTALL_DIR="${NAK_INSTALL_DIR:-/app/bin}"
 NAK_BIN="$INSTALL_DIR/nak"
 
@@ -23,7 +23,7 @@ case "$ARCH" in
   *) echo "[NAK] Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
-DOWNLOAD_URL="https://github.com/fiatjaf/nak/releases/download/${NAK_VERSION}/nak-${OS}-${ARCH}"
+DOWNLOAD_URL="https://github.com/fiatjaf/nak/releases/download/${NAK_VERSION}/nak-${NAK_VERSION}-${OS}-${ARCH}"
 echo "[NAK] Downloading from $DOWNLOAD_URL"
 
 if curl -fsSL "$DOWNLOAD_URL" -o "$NAK_BIN"; then
