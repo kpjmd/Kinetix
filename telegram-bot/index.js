@@ -1581,6 +1581,23 @@ bot.command('tx_history', async (ctx) => {
   }
 });
 
+bot.command('export_wallet', async (ctx) => {
+  try {
+    const exportData = await walletManager.wallet.exportWallet();
+    const json = JSON.stringify(exportData.walletData);
+    await ctx.reply(
+      `🔑 *Wallet Export*\n\n` +
+      `Address: \`${exportData.address}\`\n` +
+      `Network: ${exportData.networkId}\n\n` +
+      `*Set this as WALLET\\_DATA in Railway env vars:*\n` +
+      `\`\`\`\n${json}\n\`\`\``,
+      { parse_mode: 'Markdown' }
+    );
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
 // ========================================
 // END WALLET COMMANDS
 // ========================================
