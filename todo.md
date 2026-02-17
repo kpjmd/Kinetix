@@ -1,8 +1,32 @@
-.# Kinetix Agent - Development Roadmap
+# Kinetix Agent - Development Roadmap
 
-## 📊 Current Status (Last Updated: 2026-02-13)
+## 📊 Current Status (Last Updated: 2026-02-17)
 
-**Wallet Address:** `0xD239173c897C24b477F96AFd544195c1606Dd691` (Base - AgentKit CDP)
+### Canonical Identity & Wallets
+
+**Signing / Identity Wallet:** `0x821a61d2C3E02446eD03285df1618639eF25D2b9`
+- Kinetix's on-chain controller address (ERC-8004 Token 16892)
+- Signs all attestation receipts (`issuer.pubkey` in every receipt)
+- Set via `KINETIX_SIGNING_KEY` env var on both Railway deployments
+- **Must never change** — all on-chain registrations and issued receipts reference this address
+
+**Payment / CDP Wallet:** `0xD203776d8279cfcA540473a0AB6197D53c96cbaf`
+- Receives USDC payments from x402 verification services
+- Used for on-chain transactions (AgentKit CDP)
+- Set via `WALLET_DATA={"address":"0xD203776d..."}` env var on both Railway deployments
+- Monitor: https://basescan.org/address/0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+
+### Railway Deployments (Both Persistent)
+
+| Service | URL | Entry Point |
+|---------|-----|-------------|
+| x402 verification server | https://kinetix-production-1a28.up.railway.app | `scripts/start-x402-server.js` |
+| Telegram bot | (Railway internal) | `telegram-bot/index.js` |
+
+**Railway env vars required on both services:**
+- `WALLET_DATA={"address":"0xD203776d8279cfcA540473a0AB6197D53c96cbaf"}` — prevents new wallet creation on each deploy
+- `KINETIX_SIGNING_KEY=<private key>` — ensures `0x821a...` is always the attestation signer
+- `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET` — CDP credentials
 
 **ERC-8004 Identity:**
 - Token ID: **16892** (Base Mainnet)
@@ -10,10 +34,7 @@
 - Profile: https://8004scan.io/agents/base/16892
 - Status: ✅ Registered, 0 validation warnings, enhanced metadata deployed
 
-**Current Phase:** ERC-8004 Self-Verification (Day 2/3 complete)
-- Commitment: 3 consecutive days of Clawstr engagement
-- Final day: Tomorrow (Feb 13, 2026)
-- First attestation: Ready to submit to Reputation Registry
+**Current Phase:** x402 Verification Service live + Phase 2 autonomous operations
 
 **Phase 1 Complete ✅**
 Core infrastructure, social integrations, wallet, and safety systems operational:
@@ -85,9 +106,10 @@ Autonomous revenue and self-sustaining operations roadmap:
 ## Wallet Integration (CDP AgentKit) ✅
 - [x] Set up Coinbase AgentKit for Base chain
 - [x] Implement CDP wallet creation (wallet/agentkit.js)
-- [x] Add wallet persistence (wallet-data/wallet.json)
+- [x] Add wallet persistence via `WALLET_DATA` env var (Railway-safe; falls back to wallet-data/wallet.json locally)
+- [x] Fix: pass `config.address` to `configureWithWallet()` so existing wallet is restored, not recreated
 - [x] Create balance checking (ETH, USDC)
-- [x] Build wallet export functionality
+- [x] Build wallet export functionality (`/export_wallet` Telegram command)
 - [x] Create integration examples and tests
 
 ## Safety Controller ✅
