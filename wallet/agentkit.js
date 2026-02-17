@@ -90,8 +90,8 @@ class KinetixWallet {
       // Wallet secret is required for CDP managed wallets
       walletProviderConfig.walletSecret = process.env.CDP_WALLET_SECRET;
 
-      if (walletData) {
-        walletProviderConfig.cdpWalletData = walletData;
+      if (walletData && walletData.address) {
+        walletProviderConfig.address = walletData.address;
       }
 
       // Initialize wallet provider
