@@ -77,30 +77,37 @@ async function recordEngagement(type, id, metadata = {}) {
     case 'upvote':
       if (!state.upvotedPosts.includes(id)) {
         state.upvotedPosts.push(id);
+        if (state.upvotedPosts.length > 5000) state.upvotedPosts = state.upvotedPosts.slice(-5000);
       }
       break;
     case 'downvote':
       if (!state.downvotedPosts.includes(id)) {
         state.downvotedPosts.push(id);
+        if (state.downvotedPosts.length > 5000) state.downvotedPosts = state.downvotedPosts.slice(-5000);
       }
       break;
     case 'comment':
       state.commentedPosts.push(record);
+      if (state.commentedPosts.length > 1000) state.commentedPosts = state.commentedPosts.slice(-1000);
       break;
     case 'reply':
       state.repliedComments.push(record);
+      if (state.repliedComments.length > 1000) state.repliedComments = state.repliedComments.slice(-1000);
       break;
     // Clawstr engagement types
     case 'clawstr_react':
       if (!state.clawstr_reacted_events.includes(id)) {
         state.clawstr_reacted_events.push(id);
+        if (state.clawstr_reacted_events.length > 5000) state.clawstr_reacted_events = state.clawstr_reacted_events.slice(-5000);
       }
       break;
     case 'clawstr_reply':
       state.clawstr_replied_events.push(record);
+      if (state.clawstr_replied_events.length > 1000) state.clawstr_replied_events = state.clawstr_replied_events.slice(-1000);
       break;
     case 'clawstr_post':
       state.clawstr_posted_subclaws.push(record);
+      if (state.clawstr_posted_subclaws.length > 1000) state.clawstr_posted_subclaws = state.clawstr_posted_subclaws.slice(-1000);
       break;
   }
 

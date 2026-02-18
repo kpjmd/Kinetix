@@ -76,6 +76,7 @@ class HeartbeatSystem {
 
       // 4.5. Process discoveries (verifiable claims and explicit requests)
       let discoveryCount = 0;
+      let autoApprovedCount = 0;
       if (engagementPlan.discoveries && engagementPlan.discoveries.length > 0) {
         const discoveryService = require('../services/discovery-service');
         for (const discovery of engagementPlan.discoveries) {
@@ -86,12 +87,40 @@ class HeartbeatSystem {
             } else {
               result = await discoveryService.addSuggestion(discovery);
             }
-            if (result) discoveryCount++;
+            if (!result) continue;
+            discoveryCount++;
+
+            // Auto-approve: explicit requests always; high-confidence passive discoveries
+            const shouldAutoApprove =
+              discovery.source_type === 'explicit_request' ||
+              (discovery.source_type !== 'explicit_request' && discovery.confidence === 'high');
+
+            if (shouldAutoApprove) {
+              try {
+                const approvalResult = await discoveryService.approveSuggestion(
+                  result.id,
+                  'kinetix_autonomous'
+                );
+                autoApprovedCount++;
+                const reason = discovery.source_type === 'explicit_request'
+                  ? 'explicit_request'
+                  : 'high-confidence passive';
+                const notifText = `🤖 Auto-approved verification: ${discovery.agent_id}\n` +
+                  `Type: ${discovery.suggested_verification?.verification_type || 'unknown'}\n` +
+                  `Reason: ${reason}\n` +
+                  `Verification ID: ${approvalResult?.verification_id || 'N/A'}`;
+                if (this.bot && this.adminId) {
+                  await this.bot.telegram.sendMessage(this.adminId, notifText).catch(() => {});
+                }
+              } catch (approveError) {
+                console.error('[Heartbeat] Auto-approve error:', approveError.message);
+              }
+            }
           } catch (error) {
             console.error('[Heartbeat] Discovery error:', error.message);
           }
         }
-        console.log(`[Heartbeat] Processed ${discoveryCount} new discoveries/requests`);
+        console.log(`[Heartbeat] Processed ${discoveryCount} new discoveries/requests (${autoApprovedCount} auto-approved)`);
       }
 
       // 5. Update state

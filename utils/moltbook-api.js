@@ -162,14 +162,11 @@ async function getSubmoltId(submoltName) {
  */
 async function createPost(submolt, title, content) {
   try {
-    // Check if submolt is already a UUID (36 chars with dashes)
-    const isUUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(submolt);
-
-    // Get submolt_id if name was provided
-    const submolt_id = isUUID ? submolt : await getSubmoltId(submolt);
+    // API now expects submolt_name (string), not submolt_id (UUID)
+    const submolt_name = submolt;
 
     const response = await client.post('/posts', {
-      submolt_id,  // Fixed: use submolt_id instead of submolt
+      submolt_name,
       title,
       content
     });
