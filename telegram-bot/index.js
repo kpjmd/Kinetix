@@ -1864,6 +1864,20 @@ async function removeFromQueue(id) {
 async function main() {
   await loadConfigs();
 
+  // Wire up Telegram admin notifier for moltbook-api and challenge-solver
+  const adminNotifier = async (message) => {
+    if (ADMIN_ID) {
+      try {
+        await bot.telegram.sendMessage(ADMIN_ID, message, { parse_mode: 'Markdown' });
+      } catch (e) {
+        console.error('[AdminNotifier] Failed to send Telegram message:', e.message);
+      }
+    }
+  };
+  moltbookApi.setAdminNotifier(adminNotifier);
+  const challengeSolver = require('../utils/challenge-solver');
+  challengeSolver.setAdminNotifier(adminNotifier);
+
   // Initialize data store directories
   const dataStore = require('../services/data-store');
   await dataStore.ensureDirectories();

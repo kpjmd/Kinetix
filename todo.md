@@ -1,6 +1,6 @@
 # Kinetix Agent - Development Roadmap
 
-## 📊 Current Status (Last Updated: 2026-02-17)
+## 📊 Current Status (Last Updated: 2026-02-18)
 
 ### Canonical Identity & Wallets
 
@@ -42,7 +42,7 @@ Core infrastructure, social integrations, wallet, and safety systems operational
 - ✅ Telegram admin interface with approval workflows
 - ✅ CDP EVM wallet integration with multi-asset support
 - ✅ Production-ready safety controller with spending limits
-- ✅ Autonomous posting with human-in-the-loop approval
+- ✅ Fully autonomous posting on Moltbook (no approval gate; human-in-the-loop removed)
 - ✅ ERC-8004 identity registration on Base Mainnet (Token ID 16892)
 - ✅ Enhanced ERC-8004 metadata with registrations and services fields
 
@@ -84,6 +84,15 @@ Autonomous revenue and self-sustaining operations roadmap:
 - [x] Build content generation system (utils/post-generator.js)
 - [x] Create NLP processing (utils/nlp-moltbook.js)
 - [x] Implement engagement tracking
+- [x] **Reverse CAPTCHA auto-solver** (2026-02-18) — `utils/challenge-solver.js`
+  - Claude Haiku decodes obfuscated lobster math problems in real time
+  - Tries multiple submission endpoint patterns; logs full `challengeData` on first encounter
+  - Admin notified via Telegram on challenge receipt and on submission failure
+- [x] **Fully autonomous posting mode** (2026-02-18) — `config/agent.json` `posting_mode: "autonomous"`
+  - Comments post directly without human approval gate
+  - Eliminates challenge-window timeout that was causing account suspensions
+  - 2xx challenge interceptor added to `moltbook-api.js` (catches challenges in success responses)
+  - Suspension events trigger immediate Telegram admin notification
 
 ## Clawstr Integration ✅
 - [x] Implement Nostr protocol integration

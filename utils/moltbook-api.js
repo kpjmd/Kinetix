@@ -17,31 +17,52 @@ client.interceptors.request.use(config => {
   return config;
 });
 
-// Response interceptor for error diagnostics
+// Suspension/challenge admin notifier (set externally by telegram-bot)
+let _moltbookAdminNotifier = null;
+function setAdminNotifier(fn) {
+  _moltbookAdminNotifier = fn;
+}
+async function _notifyAdmin(msg) {
+  if (_moltbookAdminNotifier) {
+    try { await _moltbookAdminNotifier(msg); } catch (e) { /* silent */ }
+  }
+}
+
+// Response interceptor for success responses that embed a challenge
 client.interceptors.response.use(
-  response => response,
+  response => {
+    const { data } = response;
+    if (data && (data.challenge || data.challenge_text || data.verification_required)) {
+      console.error('[Moltbook API] ⚠️ Challenge embedded in 2xx response - treating as challenge error');
+      console.error('[Moltbook API] Full response data:', JSON.stringify(data, null, 2));
+      const err = new Error(`Challenge required: ${data.challenge || data.challenge_text || 'verification_required'}`);
+      err.isChallenge = true;
+      err.challengeData = data;
+      throw err;
+    }
+    return response;
+  },
   error => {
     if (error.response) {
       const { status, data } = error.response;
 
       console.error('[Moltbook API] Error Response:');
       console.error(`  Status: ${status}`);
-      console.error(`  Data:`, JSON.stringify(data, null, 2));
+      console.error(`  Full Data:`, JSON.stringify(data, null, 2));
 
-      // Detect AI verification challenges
+      // Detect AI verification challenges — log ALL fields
       if (status === 401 || status === 403) {
         if (data.challenge || data.verification_required || data.ai_challenge) {
           console.error('[Moltbook API] ⚠️ AI VERIFICATION CHALLENGE DETECTED');
-          console.error('[Moltbook API] Challenge:', data);
-          console.error('[Moltbook API] This usually means the API request was malformed.');
-          console.error('[Moltbook API] Check that you are using submolt_id (UUID) not submolt (name).');
+          console.error('[Moltbook API] Full challengeData:', JSON.stringify(data, null, 2));
         }
       }
 
-      // Check for suspension messages
+      // Check for suspension messages and notify admin
       if (data.error && data.error.includes('suspended')) {
         console.error('[Moltbook API] ⚠️ ACCOUNT SUSPENDED');
         console.error('[Moltbook API] Reason:', data.error);
+        _notifyAdmin(`🚫 *Moltbook Account Suspended*\n\nReason: ${data.error}`);
       }
     } else if (error.request) {
       console.error('[Moltbook API] No response received');
@@ -154,6 +175,12 @@ async function createPost(submolt, title, content) {
     });
     return response.data;
   } catch (error) {
+    if (error.isChallenge) {
+      console.log('[Moltbook API] Challenge received on createPost - auto-solving...');
+      const { solveChallengeAndSubmit } = require('./challenge-solver');
+      await solveChallengeAndSubmit(error.challengeData);
+      return; // content is live after challenge answer accepted
+    }
     handleError(error);
   }
 }
@@ -204,6 +231,12 @@ async function addComment(postId, content, parentId = null) {
     const response = await client.post(`/posts/${postId}/comments`, payload);
     return response.data;
   } catch (error) {
+    if (error.isChallenge) {
+      console.log('[Moltbook API] Challenge received on addComment - auto-solving...');
+      const { solveChallengeAndSubmit } = require('./challenge-solver');
+      await solveChallengeAndSubmit(error.challengeData);
+      return; // content is live after challenge answer accepted
+    }
     handleError(error);
   }
 }
@@ -482,5 +515,8 @@ module.exports = {
   unfollowAgent,
 
   // Status
-  getStatus
+  getStatus,
+
+  // Admin notifier registration
+  setAdminNotifier
 };

@@ -6,7 +6,7 @@
   "model": "claude-sonnet-4-5-20250929",
   "temperature": 0.7,
   "max_tokens": 4000,
-  "posting_mode": "approval",
+  "posting_mode": "autonomous",
   "clawstr": {
     "enabled": true,
     "primary_subclaw": "/c/ai-freedom",
