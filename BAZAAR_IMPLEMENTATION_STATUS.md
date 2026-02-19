@@ -93,8 +93,8 @@ extensions: {
 **File:** `.env`
 
 ```bash
-CDP_API_KEY_ID=REDACTED_CDP_KEY_ID
-CDP_API_KEY_SECRET=REDACTED_CDP_SECRET
+CDP_API_KEY_ID=[REDACTED - set in Railway environment variables]
+CDP_API_KEY_SECRET=[REDACTED - set in Railway environment variables]
 FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/x402
 X402_FACILITATOR_URL=https://api.cdp.coinbase.com/platform/v2/x402
 ```

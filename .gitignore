@@ -1,5 +1,15 @@
 node_modules/
+
+# Secrets - never commit any .env variant
 .env
+.env.*
+*.env
+*.env.backup
+*.env.txt
+
+# Credential files
+data/moltbook-credentials.json
+
 # Ephemeral runtime state — OK to lose on redeploy
 data/spending-state.json
 data/heartbeat-state.json
@@ -7,7 +17,3 @@ data/consultation-logs/
 data/conversation-history/
 *.log
 wallet-data/wallet.json
-
-# Environment backups
-.env.*
-*.env.backup
