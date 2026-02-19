@@ -1,0 +1,11 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Public $KINETIX token contract address (not a secret)"
+regexes = ['''0x208a33Fa8A72b504b309a6869390072d712E179d''']
+
+[[allowlists]]
+description = "Documentation placeholder - not a real token"
+paths = ['''KINETIX_PROTOCOL\.MD''', '''REPUTATION_RECEIPT\.MD''']
+regexes = ['''Bearer YOU''']
