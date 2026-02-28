@@ -77,8 +77,11 @@ bot.command('start', async (ctx) => {
     `👤 /clawstr_profile - View Nostr profile\n\n` +
     `*Verification:*\n` +
     `✅ /verify - Create verification or view instructions\n` +
-    `📊 /verification_status [id] - Check verification progress\n` +
-    `📜 /attestation [receipt_id] - View attestation receipt\n` +
+    `📊 /verification_summary - Pipeline dashboard (all statuses + recent attestations)\n` +
+    `📊 /verification_status [id] - Check verification progress (active only)\n` +
+    `📋 /attestations [page] - Paginated list of all attestation receipts\n` +
+    `📜 /attestation [receipt_id] - View single attestation receipt\n` +
+    `⛓️ /retry_onchain [receipt_id|all] - Retry pending ERC-8004 on-chain submissions\n` +
     `📋 /manifest - View service capabilities\n` +
     `🔍 /discoveries - View pending verification suggestions\n` +
     `✅ /approve_verify <id> - Accept suggestion → create verification\n` +
@@ -1312,6 +1315,180 @@ bot.command('announce_verification', async (ctx) => {
     );
   } catch (error) {
     await ctx.reply(`Error creating announcement: ${error.message}`);
+  }
+});
+
+// Verification summary dashboard
+bot.command('verification_summary', async (ctx) => {
+  try {
+    const dataStore = require('../services/data-store');
+    const [allCommitments, allAttestations] = await Promise.all([
+      dataStore.listCommitments(),
+      dataStore.listAttestations()
+    ]);
+
+    // Group by status
+    const byStatus = {};
+    for (const c of allCommitments) {
+      byStatus[c.status] = (byStatus[c.status] || 0) + 1;
+    }
+
+    const statusEmojis = {
+      active: '🟡',
+      attested: '✅',
+      verified: '⚠️',
+      partial: '🔄',
+      failed: '❌'
+    };
+
+    let msg = `📊 *Verification Pipeline*\n\n`;
+    for (const [status, count] of Object.entries(byStatus)) {
+      const emoji = statusEmojis[status] || '⬜';
+      const label = status.charAt(0).toUpperCase() + status.slice(1);
+      msg += `${emoji} ${label}: *${count}*\n`;
+    }
+    msg += `──────────────────\n`;
+    msg += `   Total: *${allCommitments.length}*\n\n`;
+
+    if (allAttestations.length > 0) {
+      msg += `*Recent Attestations (${allAttestations.length} total):*\n`;
+      for (const r of allAttestations.slice(0, 5)) {
+        const date = new Date(r.metadata.issued_at).toLocaleDateString();
+        const statusIcon = r.verification_result.status === 'verified' ? '✅' : r.verification_result.status === 'partial' ? '⚠️' : '❌';
+        const onchain = r.metadata?.onchain_status === 'submitted' ? '⛓️' : '⏳';
+        const score = r.verification_result.overall_score;
+        msg += `${statusIcon} ${r.receipt_id.slice(0, 18)}... — ${score}% — ${date} ${onchain}\n`;
+      }
+      if (allAttestations.length > 5) {
+        msg += `\n_/attestations for full list_`;
+      }
+    } else {
+      msg += `No attestations issued yet.`;
+    }
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+// Paginated attestation list
+bot.command('attestations', async (ctx) => {
+  try {
+    const args = ctx.message.text.split(' ').slice(1);
+    const page = Math.max(1, parseInt(args[0]) || 1);
+    const pageSize = 10;
+
+    const dataStore = require('../services/data-store');
+    const allAttestations = await dataStore.listAttestations();
+
+    if (allAttestations.length === 0) {
+      await ctx.reply('No attestations issued yet.');
+      return;
+    }
+
+    const totalPages = Math.ceil(allAttestations.length / pageSize);
+    const clampedPage = Math.min(page, totalPages);
+    const start = (clampedPage - 1) * pageSize;
+    const pageItems = allAttestations.slice(start, start + pageSize);
+
+    let msg = `📋 *Attestations — Page ${clampedPage}/${totalPages}* (${allAttestations.length} total)\n\n`;
+
+    for (const r of pageItems) {
+      const date = new Date(r.metadata.issued_at).toLocaleDateString();
+      const statusIcon = r.verification_result.status === 'verified' ? '✅' : r.verification_result.status === 'partial' ? '⚠️' : '❌';
+      const onchain = r.metadata?.onchain_status === 'submitted' ? '⛓️ submitted' : '⏳ pending';
+      const agentId = (r.recipient?.agent_id || 'unknown').slice(0, 24);
+      msg += `${statusIcon} \`${r.receipt_id}\`\n`;
+      msg += `   ${agentId}...\n`;
+      msg += `   ${r.verification_result.overall_score}% | ${r.commitment?.verification_type || 'unknown'} | ${date}\n`;
+      msg += `   ${onchain}\n\n`;
+    }
+
+    if (totalPages > 1 && clampedPage < totalPages) {
+      msg += `_/attestations ${clampedPage + 1} for next page_`;
+    }
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
+  }
+});
+
+// Retry on-chain ERC-8004 submission for pending attestations
+bot.command('retry_onchain', async (ctx) => {
+  const args = ctx.message.text.split(' ').slice(1);
+  const target = args[0] || 'all';
+
+  try {
+    const dataStore = require('../services/data-store');
+    const reputationService = require('../utils/erc8004-reputation');
+    const ipfsManager = require('../utils/ipfs-manager');
+
+    // Initialize reputation service (idempotent)
+    await reputationService.initialize();
+
+    let receiptsToRetry = [];
+    if (target === 'all') {
+      const all = await dataStore.listAttestations();
+      receiptsToRetry = all.filter(r => r.metadata?.onchain_status !== 'submitted');
+    } else {
+      const receipt = await dataStore.loadAttestation(target);
+      if (!receipt) {
+        await ctx.reply(`❌ Attestation not found: ${target}`);
+        return;
+      }
+      receiptsToRetry = [receipt];
+    }
+
+    if (receiptsToRetry.length === 0) {
+      await ctx.reply('✅ All attestations already submitted on-chain.');
+      return;
+    }
+
+    await ctx.reply(`⏳ Retrying on-chain submission for ${receiptsToRetry.length} attestation(s)...`);
+
+    let succeeded = 0;
+    let failed = 0;
+    const results = [];
+
+    for (const receipt of receiptsToRetry) {
+      try {
+        // Get IPFS hash — use existing or re-upload
+        let ipfsHash = receipt.reputation_context?.ipfs_uri?.replace('ipfs://', '');
+        if (!ipfsHash) {
+          const { ipfsHash: newHash } = await ipfsManager.uploadJSON(receipt, {
+            name: `attestation_${receipt.receipt_id}`
+          });
+          ipfsHash = newHash;
+          receipt.reputation_context = receipt.reputation_context || {};
+          receipt.reputation_context.ipfs_uri = `ipfs://${ipfsHash}`;
+        }
+
+        // Submit to ERC-8004 Reputation Registry
+        const result = await reputationService.submitAttestation(receipt, ipfsHash);
+
+        // Persist updated on-chain status
+        receipt.metadata.onchain_status = 'submitted';
+        receipt.reputation_context.submission_index = result.feedbackIndex;
+        receipt.reputation_context.tx_hash = result.txHash;
+        await dataStore.saveAttestation(receipt);
+
+        succeeded++;
+        results.push(`✅ \`${receipt.receipt_id}\`: submitted\n   tx: \`${result.txHash.slice(0, 18)}...\`\n   index: ${result.feedbackIndex}`);
+      } catch (err) {
+        failed++;
+        results.push(`❌ \`${receipt.receipt_id}\`: ${err.message}`);
+      }
+    }
+
+    let msg = `*On-chain Retry Results:*\n\n`;
+    msg += results.join('\n\n');
+    msg += `\n\n✅ Succeeded: ${succeeded} | ❌ Failed: ${failed}`;
+
+    await ctx.reply(msg, { parse_mode: 'Markdown' });
+  } catch (error) {
+    await ctx.reply(`❌ Error: ${error.message}`);
   }
 });
 
