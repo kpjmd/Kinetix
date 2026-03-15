@@ -5,12 +5,14 @@ const fs = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
 
-const COMMITMENTS_DIR = path.join(__dirname, '../data/commitments');
-const ATTESTATIONS_DIR = path.join(__dirname, '../data/attestations');
-const ERC8004_DIR = path.join(__dirname, '../data/erc8004');
-const REPUTATION_SUBMISSIONS_DIR = path.join(__dirname, '../data/erc8004/reputation-submissions');
-const X402_PAYMENTS_DIR = path.join(__dirname, '../data/x402-payments');
-const APPROVAL_QUEUE_DIR = path.join(__dirname, '../data/approval-queue');
+const BASE_DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+
+const COMMITMENTS_DIR = path.join(BASE_DATA_DIR, 'commitments');
+const ATTESTATIONS_DIR = path.join(BASE_DATA_DIR, 'attestations');
+const ERC8004_DIR = path.join(BASE_DATA_DIR, 'erc8004');
+const REPUTATION_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'erc8004/reputation-submissions');
+const X402_PAYMENTS_DIR = path.join(BASE_DATA_DIR, 'x402-payments');
+const APPROVAL_QUEUE_DIR = path.join(BASE_DATA_DIR, 'approval-queue');
 
 /**
  * Ensure data directories exist

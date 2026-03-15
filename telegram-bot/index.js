@@ -17,8 +17,9 @@ const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 const ADMIN_ID = process.env.TELEGRAM_ADMIN_ID;
-const APPROVAL_QUEUE_PATH = path.join(__dirname, '../data/approval-queue');
-const CONVERSATION_PATH = path.join(__dirname, '../data/conversation-history');
+const BASE_DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
+const APPROVAL_QUEUE_PATH = path.join(BASE_DATA_DIR, 'approval-queue');
+const CONVERSATION_PATH = path.join(BASE_DATA_DIR, 'conversation-history');
 
 // Load configurations
 let agentConfig, personality, tokens;

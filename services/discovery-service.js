@@ -5,7 +5,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const dataStore = require('./data-store');
 
-const DISCOVERY_DIR = path.join(__dirname, '../data/discovery-queue');
+const DISCOVERY_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, '../data'), 'discovery-queue');
 
 class DiscoveryService {
   constructor() {

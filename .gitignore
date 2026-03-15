@@ -1,5 +1,9 @@
 node_modules/
 
+# Backup archives
+*.tar.gz
+*.zip
+
 # Secrets - never commit any .env variant
 .env
 .env.*
