@@ -1170,6 +1170,12 @@ bot.command('manifest', async (ctx) => {
   msg += `• Clawstr (decentralized/Nostr)\n`;
   msg += `• Telegram, GitHub, Onchain (coming soon)\n`;
 
+  msg += `\n*On-chain Attestation Requirements:*\n`;
+  msg += `All verified agents receive a cryptographic IPFS receipt automatically.\n`;
+  msg += `For additional on-chain proof:\n`;
+  msg += `• ERC-8004 reputation entry: agent must provide their ERC-8004 token ID at commitment creation\n`;
+  msg += `• $KINETIX token distribution: agent must provide a Base wallet address at commitment creation _(Phase 2)_\n`;
+
   msg += `\n*API:* POST /api/v1/verify`;
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -1397,7 +1403,11 @@ bot.command('attestations', async (ctx) => {
     for (const r of pageItems) {
       const date = new Date(r.metadata.issued_at).toLocaleDateString();
       const statusIcon = r.verification_result.status === 'verified' ? '✅' : r.verification_result.status === 'partial' ? '⚠️' : '❌';
-      const onchain = r.metadata?.onchain_status === 'submitted' ? '⛓️ submitted' : '⏳ pending';
+      const onchainStatus = r.metadata?.onchain_status;
+      const onchain = onchainStatus === 'submitted' ? '⛓️ submitted'
+        : onchainStatus === 'skipped_self_verification' ? '⏭️ skipped (self)'
+        : onchainStatus === 'skipped_not_registered' ? '⏭️ skipped (no ERC-8004)'
+        : '⏳ pending';
       const agentId = (r.recipient?.agent_id || 'unknown').slice(0, 24);
       msg += `${statusIcon} \`${r.receipt_id}\`\n`;
       msg += `   ${agentId}...\n`;
@@ -1449,6 +1459,7 @@ bot.command('retry_onchain', async (ctx) => {
     await ctx.reply(`⏳ Retrying on-chain submission for ${receiptsToRetry.length} attestation(s)...`);
 
     let succeeded = 0;
+    let skipped = 0;
     let failed = 0;
     const results = [];
 
@@ -1477,14 +1488,26 @@ bot.command('retry_onchain', async (ctx) => {
         succeeded++;
         results.push(`✅ \`${receipt.receipt_id}\`: submitted\n   tx: \`${result.txHash.slice(0, 18)}...\`\n   index: ${result.feedbackIndex}`);
       } catch (err) {
-        failed++;
-        results.push(`❌ \`${receipt.receipt_id}\`: ${err.message}`);
+        if (err.message.startsWith('SELF_VERIFICATION:')) {
+          receipt.metadata.onchain_status = 'skipped_self_verification';
+          await dataStore.saveAttestation(receipt);
+          skipped++;
+          results.push(`⏭️ \`${receipt.receipt_id}\`: skipped (self-verification)`);
+        } else if (err.message.includes('erc8004_token_id')) {
+          receipt.metadata.onchain_status = 'skipped_not_registered';
+          await dataStore.saveAttestation(receipt);
+          skipped++;
+          results.push(`⏭️ \`${receipt.receipt_id}\`: skipped (agent not on ERC-8004)`);
+        } else {
+          failed++;
+          results.push(`❌ \`${receipt.receipt_id}\`: ${err.message}`);
+        }
       }
     }
 
     let msg = `*On-chain Retry Results:*\n\n`;
     msg += results.join('\n\n');
-    msg += `\n\n✅ Succeeded: ${succeeded} | ❌ Failed: ${failed}`;
+    msg += `\n\n✅ Succeeded: ${succeeded} | ⏭️ Skipped: ${skipped} | ❌ Failed: ${failed}`;
 
     await ctx.reply(msg, { parse_mode: 'Markdown' });
   } catch (error) {

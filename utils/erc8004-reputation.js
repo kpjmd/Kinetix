@@ -98,8 +98,14 @@ class ERC8004ReputationService {
    * Map attestation receipt to giveFeedback parameters
    */
   _mapReceiptToFeedback(receipt, ipfsHash) {
-    // agentId: Kinetix's ERC-8004 token ID
-    const agentId = this.kinetixTokenId;
+    // agentId: the recipient's ERC-8004 token ID (not Kinetix's own)
+    const agentId = receipt.recipient?.erc8004_token_id;
+    if (!agentId) {
+      throw new Error(
+        `Recipient "${receipt.recipient?.agent_id}" has no erc8004_token_id. ` +
+        `They must be registered on ERC-8004 for on-chain reputation submission.`
+      );
+    }
 
     // value: overall_score (0-100)
     const value = receipt.verification_result?.overall_score || 0;
@@ -172,6 +178,15 @@ class ERC8004ReputationService {
   }
 
   /**
+   * Returns true if the receipt is a self-verification (Kinetix verifying itself)
+   */
+  isSelfVerification(receipt) {
+    const recipientId = (receipt.recipient?.agent_id || '').toLowerCase();
+    return ['kinetix', 'kinetix_official'].includes(recipientId) ||
+      receipt.recipient?.pubkey === this.walletAddress;
+  }
+
+  /**
    * Submit attestation to Reputation Registry
    * @param {Object} receipt - Attestation receipt
    * @param {string} ipfsHash - IPFS hash of attestation
@@ -179,6 +194,9 @@ class ERC8004ReputationService {
    */
   async submitAttestation(receipt, ipfsHash) {
     this._ensureInitialized();
+    if (this.isSelfVerification(receipt)) {
+      throw new Error('SELF_VERIFICATION: Self-feedback not allowed by ERC-8004. Kinetix cannot submit on-chain entries for its own commitments.');
+    }
 
     const params = this._mapReceiptToFeedback(receipt, ipfsHash);
 
