@@ -14,6 +14,15 @@ describe('signing-key helper', () => {
     expect(getSigningKey()).toBe('0x' + 'a'.repeat(64));
   });
 
+  it('accepts a valid bare 64-hex key and normalises the 0x prefix', () => {
+    // ethers.Wallet accepts a bare 64-hex key; requiring the 0x prefix would
+    // reject a legitimately-working .env value.
+    process.env.KINETIX_SIGNING_KEY = 'a'.repeat(64);
+    expect(getSigningKey()).toBe('0x' + 'a'.repeat(64));
+    // and it must construct a wallet whose address is deterministic
+    expect(createSigner().address).toMatch(/^0x[0-9a-fA-F]{40}$/);
+  });
+
   it('never includes key material in the error for a malformed key', () => {
     process.env.KINETIX_SIGNING_KEY = '0xSECRET_MATERIAL_should_never_be_logged';
     expect(() => getSigningKey()).toThrow(/Invalid KINETIX_SIGNING_KEY format/);

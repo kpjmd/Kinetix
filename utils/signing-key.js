@@ -18,6 +18,13 @@ const PRIVATE_KEY_RE = /^0x[0-9a-fA-F]{64}$/;
 
 /**
  * Read and validate KINETIX_SIGNING_KEY from the environment.
+ *
+ * The `0x` prefix is optional in the .env value: a bare 64-hex private key is
+ * valid key material (ethers.Wallet accepts it), so we normalise by prepending
+ * `0x` when absent before validating. Requiring the prefix would reject a
+ * legitimately-working key — the whole point here is leak-safety, not format
+ * pedantry.
+ *
  * @returns {string} the validated 0x-prefixed 32-byte hex key
  * @throws {Error} with a fixed-string message that never contains key material
  */
@@ -27,13 +34,14 @@ function getSigningKey() {
     throw new Error('KINETIX_SIGNING_KEY not set in .env');
   }
   const key = raw.trim();
-  if (!PRIVATE_KEY_RE.test(key)) {
+  const normalized = key.startsWith('0x') ? key : '0x' + key;
+  if (!PRIVATE_KEY_RE.test(normalized)) {
     // Deliberately no interpolation of `raw`/`key` — never echo the value.
     throw new Error(
-      'Invalid KINETIX_SIGNING_KEY format: expected a 0x-prefixed 64-character hex private key.'
+      'Invalid KINETIX_SIGNING_KEY format: expected a 64-character hex private key (optional 0x prefix).'
     );
   }
-  return key;
+  return normalized;
 }
 
 /**
