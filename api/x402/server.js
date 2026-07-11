@@ -279,7 +279,7 @@ function createPaymentMetadata(tier, req) {
 // Basic verification endpoint
 app.post('/api/x402/verify/basic', async (req, res) => {
   try {
-    const { agent_id, platform, platform_handle, commitment_description } = req.body;
+    const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id } = req.body;
 
     if (!agent_id || !platform || !platform_handle) {
       return res.status(400).json({
@@ -303,7 +303,8 @@ app.post('/api/x402/verify/basic', async (req, res) => {
         duration_days: pricingConfig.tiers.basic.max_duration_days,
         minimum_actions: 1
       },
-      payment: paymentMetadata
+      payment: paymentMetadata,
+      erc8004_token_id: erc8004_token_id || null
     };
 
     const verification = await verificationService.createVerification(commitment);
@@ -337,7 +338,7 @@ app.post('/api/x402/verify/basic', async (req, res) => {
 // Advanced verification endpoint
 app.post('/api/x402/verify/advanced', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria } = req.body;
+    const { agent_id, commitment_description, criteria, erc8004_token_id } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
       return res.status(400).json({
@@ -359,7 +360,8 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
         frequency: criteria.frequency || 'daily',
         ...criteria
       },
-      payment: paymentMetadata
+      payment: paymentMetadata,
+      erc8004_token_id: erc8004_token_id || null
     };
 
     const verification = await verificationService.createVerification(commitment);
@@ -393,7 +395,7 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
 // Premium verification endpoint
 app.post('/api/x402/verify/premium', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria, verification_type } = req.body;
+    const { agent_id, commitment_description, criteria, verification_type, erc8004_token_id } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
       return res.status(400).json({
@@ -414,7 +416,8 @@ app.post('/api/x402/verify/premium', async (req, res) => {
         duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days),
         ...criteria
       },
-      payment: paymentMetadata
+      payment: paymentMetadata,
+      erc8004_token_id: erc8004_token_id || null
     };
 
     const verification = await verificationService.createVerification(commitment);

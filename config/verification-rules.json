@@ -67,5 +67,8 @@
   "monitoring": {
     "check_interval_minutes": 60,
     "max_active_commitments": 100
+  },
+  "onchain_reconciliation": {
+    "check_interval_minutes": 180
   }
 }

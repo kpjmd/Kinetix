@@ -5,6 +5,10 @@
       "base_sepolia": "0x8004A818BFB912233c491871b3d84c89A494BD9e",
       "ethereum_mainnet": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
     },
+    "deploymentBlock": {
+      "base_mainnet": 41663783,
+      "base_sepolia": 36304145
+    },
     "abi": [
       {
         "inputs": [],

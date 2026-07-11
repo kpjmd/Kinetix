@@ -1405,15 +1405,21 @@ bot.command('attestations', async (ctx) => {
       const date = new Date(r.metadata.issued_at).toLocaleDateString();
       const statusIcon = r.verification_result.status === 'verified' ? '✅' : r.verification_result.status === 'partial' ? '⚠️' : '❌';
       const onchainStatus = r.metadata?.onchain_status;
-      const onchain = onchainStatus === 'submitted' ? '⛓️ submitted'
-        : onchainStatus === 'skipped_self_verification' ? '⏭️ skipped (self)'
-        : onchainStatus === 'skipped_not_registered' ? '⏭️ skipped (no ERC-8004)'
-        : '⏳ pending';
+      const onchain = onchainStatus === 'submitted' ? '⛓️ ERC-8004 submitted'
+        : onchainStatus === 'skipped_self_verification' ? '⏭️ ERC-8004 skipped (self)'
+        : onchainStatus === 'skipped_not_registered' ? '⏭️ ERC-8004 skipped (no token yet)'
+        : onchainStatus === 'failed_permanent' ? '🛑 ERC-8004 failed (retry cap reached)'
+        : '⏳ ERC-8004 pending';
+      const easStatus = r.eas?.status;
+      const eas = easStatus === 'submitted' ? '🔗 EAS submitted'
+        : easStatus === 'skipped_no_wallet' ? '⏭️ EAS skipped (no wallet)'
+        : easStatus === 'failed' ? '❌ EAS failed'
+        : '⏳ EAS pending';
       const agentId = (r.recipient?.agent_id || 'unknown').slice(0, 24);
       msg += `${statusIcon} \`${r.receipt_id}\`\n`;
       msg += `   ${agentId}...\n`;
       msg += `   ${r.verification_result.overall_score}% | ${r.commitment?.verification_type || 'unknown'} | ${date}\n`;
-      msg += `   ${onchain}\n\n`;
+      msg += `   ${onchain} | ${eas}\n\n`;
     }
 
     if (totalPages > 1 && clampedPage < totalPages) {
@@ -1426,88 +1432,59 @@ bot.command('attestations', async (ctx) => {
   }
 });
 
-// Retry on-chain ERC-8004 submission for pending attestations
+// Retry on-chain ERC-8004 submission for pending attestations.
+// Thin wrapper over reconciliation-service.js — the same logic runs on a
+// schedule automatically; this lets an admin trigger (and compare) a run on demand.
 bot.command('retry_onchain', async (ctx) => {
   const args = ctx.message.text.split(' ').slice(1);
   const target = args[0] || 'all';
 
   try {
     const dataStore = require('../services/data-store');
-    const reputationService = require('../utils/erc8004-reputation');
-    const ipfsManager = require('../utils/ipfs-manager');
+    const reconciliationService = require('../services/reconciliation-service');
 
-    // Initialize reputation service (idempotent)
-    await reputationService.initialize();
-
-    let receiptsToRetry = [];
+    let outcomes = [];
     if (target === 'all') {
-      const all = await dataStore.listAttestations();
-      receiptsToRetry = all.filter(r => r.metadata?.onchain_status !== 'submitted');
+      await ctx.reply('⏳ Retrying on-chain submission for all pending attestations...');
+      const { results } = await reconciliationService.reconcileAll();
+      outcomes = results;
     } else {
       const receipt = await dataStore.loadAttestation(target);
       if (!receipt) {
         await ctx.reply(`❌ Attestation not found: ${target}`);
         return;
       }
-      receiptsToRetry = [receipt];
+      await ctx.reply(`⏳ Retrying on-chain submission for ${target}...`);
+      outcomes = [await reconciliationService.reconcileOne(receipt)];
     }
 
-    if (receiptsToRetry.length === 0) {
+    if (outcomes.length === 0) {
       await ctx.reply('✅ All attestations already submitted on-chain.');
       return;
     }
 
-    await ctx.reply(`⏳ Retrying on-chain submission for ${receiptsToRetry.length} attestation(s)...`);
+    const statusEmoji = {
+      submitted: '✅',
+      skipped_self_verification: '⏭️',
+      skipped_not_registered: '⏭️',
+      failed_permanent: '🛑',
+      failed: '❌'
+    };
 
-    let succeeded = 0;
-    let skipped = 0;
-    let failed = 0;
-    const results = [];
+    const lines = outcomes.map(o => {
+      const emoji = statusEmoji[o.status] || '❌';
+      const detail = o.status === 'submitted'
+        ? `tx: \`${(o.detail || '').slice(0, 18)}...\``
+        : o.detail;
+      return `${emoji} \`${o.receipt_id}\`: ${o.status}${detail ? `\n   ${detail}` : ''}`;
+    });
 
-    for (const receipt of receiptsToRetry) {
-      try {
-        // Get IPFS hash — use existing or re-upload
-        let ipfsHash = receipt.reputation_context?.ipfs_uri?.replace('ipfs://', '');
-        if (!ipfsHash) {
-          const { ipfsHash: newHash } = await ipfsManager.uploadJSON(receipt, {
-            name: `attestation_${receipt.receipt_id}`
-          });
-          ipfsHash = newHash;
-          receipt.reputation_context = receipt.reputation_context || {};
-          receipt.reputation_context.ipfs_uri = `ipfs://${ipfsHash}`;
-        }
-
-        // Submit to ERC-8004 Reputation Registry
-        const result = await reputationService.submitAttestation(receipt, ipfsHash);
-
-        // Persist updated on-chain status
-        receipt.metadata.onchain_status = 'submitted';
-        receipt.reputation_context.submission_index = result.feedbackIndex;
-        receipt.reputation_context.tx_hash = result.txHash;
-        await dataStore.saveAttestation(receipt);
-
-        succeeded++;
-        results.push(`✅ \`${receipt.receipt_id}\`: submitted\n   tx: \`${result.txHash.slice(0, 18)}...\`\n   index: ${result.feedbackIndex}`);
-      } catch (err) {
-        if (err.message.startsWith('SELF_VERIFICATION:')) {
-          receipt.metadata.onchain_status = 'skipped_self_verification';
-          await dataStore.saveAttestation(receipt);
-          skipped++;
-          results.push(`⏭️ \`${receipt.receipt_id}\`: skipped (self-verification)`);
-        } else if (err.message.includes('erc8004_token_id')) {
-          receipt.metadata.onchain_status = 'skipped_not_registered';
-          await dataStore.saveAttestation(receipt);
-          skipped++;
-          results.push(`⏭️ \`${receipt.receipt_id}\`: skipped (agent not on ERC-8004)`);
-        } else {
-          failed++;
-          results.push(`❌ \`${receipt.receipt_id}\`: ${err.message}`);
-        }
-      }
-    }
+    const succeeded = outcomes.filter(o => o.status === 'submitted').length;
+    const skipped = outcomes.filter(o => o.status.startsWith('skipped')).length;
+    const failed = outcomes.length - succeeded - skipped;
 
     let msg = `*On-chain Retry Results:*\n\n`;
-    msg += results.join('\n\n');
+    msg += lines.join('\n\n');
     msg += `\n\n✅ Succeeded: ${succeeded} | ⏭️ Skipped: ${skipped} | ❌ Failed: ${failed}`;
 
     await ctx.reply(msg, { parse_mode: 'Markdown' });
@@ -2111,6 +2088,13 @@ async function main() {
   await monitoringService.start(checkInterval);
   console.log(`🔍 Monitoring started (every ${checkInterval} minutes)`);
 
+  // Initialize + start on-chain reconciliation (retries stalled ERC-8004 submissions)
+  const reconciliationService = require('../services/reconciliation-service');
+  reconciliationService.initialize();
+  const reconcileInterval = verificationRules.onchain_reconciliation?.check_interval_minutes || 180;
+  reconciliationService.start(reconcileInterval);
+  console.log(`⛓️  On-chain reconciliation started (every ${reconcileInterval} minutes)`);
+
   // Initialize Discovery Service
   const discoveryService = require('../services/discovery-service');
   await discoveryService.ensureDirectory();
@@ -2127,6 +2111,7 @@ async function main() {
   bot.context.attestationService = attestationService;
   bot.context.monitoringService = monitoringService;
   bot.context.discoveryService = discoveryService;
+  bot.context.reconciliationService = reconciliationService;
 
   // Start Express API server
   const { createApiServer } = require('../api');

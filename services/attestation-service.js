@@ -74,7 +74,8 @@ class AttestationService {
         agent_id: commitment.agent_id,
         pubkey: commitment.pubkey || '',
         platform_profiles: commitment.platform_profiles || {},
-        wallet_address: commitment.pubkey || ''
+        wallet_address: commitment.pubkey || '',
+        erc8004_token_id: commitment.erc8004_token_id || null
       },
 
       commitment: {
@@ -130,6 +131,18 @@ class AttestationService {
         ipfs_uri: null,           // Filled during IPFS upload
         submission_index: null,   // Filled after on-chain submission
         submitted_at: null        // Filled after on-chain submission
+      },
+
+      // Chain-agnostic on-chain proof — issued for every receipt regardless of
+      // ERC-8004 registration status, since EAS needs no recipient pre-registration.
+      eas: {
+        schema_uid: null,
+        attestation_uid: null,
+        tx_hash: null,
+        network: null,
+        explorer_url: null,
+        submitted_at: null,
+        status: 'pending' // pending | submitted | skipped_no_wallet | failed
       }
     };
 

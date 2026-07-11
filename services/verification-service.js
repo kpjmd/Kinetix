@@ -6,6 +6,7 @@ const verificationRules = require('../config/verification-rules.json');
 const crypto = require('crypto');
 const ipfsManager = require('../utils/ipfs-manager');
 const reputationService = require('../utils/erc8004-reputation');
+const easService = require('../utils/eas-attestation');
 
 class VerificationService {
   constructor() {
@@ -71,7 +72,8 @@ class VerificationService {
       start_date: startDate,
       end_date: endDate,
       payment: commitment.payment || null,
-      scoring_result: null
+      scoring_result: null,
+      erc8004_token_id: commitment.erc8004_token_id || null
     };
 
     await dataStore.saveCommitment(record);
@@ -215,30 +217,68 @@ class VerificationService {
 
     this._log(`Issued attestation ${receipt.receipt_id} for ${verificationId}`);
 
-    // Week 2 Track B: Auto-submit to IPFS and Reputation Registry
-    // Wrapped in try-catch so attestation issuance never fails
+    // On-chain anchoring: IPFS upload feeds both the ERC-8004 submission and
+    // (optionally) the EAS attestation's ipfsUri field. Neither on-chain path
+    // may block or fail attestation issuance — the receipt above is already saved.
+    let ipfsHash = null;
+    let gatewayUrl = null;
     try {
-      // Step 1: Upload attestation to IPFS
       this._log(`Uploading attestation ${receipt.receipt_id} to IPFS...`);
-      const { ipfsHash, gatewayUrl } = await ipfsManager.uploadJSON(receipt, {
+      const uploadResult = await ipfsManager.uploadJSON(receipt, {
         name: `attestation-${receipt.receipt_id}`
       });
+      ipfsHash = uploadResult.ipfsHash;
+      gatewayUrl = uploadResult.gatewayUrl;
+      receipt.reputation_context.ipfs_uri = `ipfs://${ipfsHash}`;
+      await dataStore.saveAttestation(receipt);
       this._log(`Uploaded to IPFS: ${ipfsHash}`);
+    } catch (error) {
+      this._log(`IPFS upload failed (attestation still valid; on-chain submissions proceed without it where possible)`, {
+        error: error.message
+      });
+    }
 
-      // Step 2: Submit to Reputation Registry
+    // Week 2 Track B (ERC-8004) + EAS: independent, best-effort, run concurrently.
+    // Neither submission's success/failure may affect the other or the receipt itself.
+    await Promise.allSettled([
+      this._submitToReputationRegistry(receipt, ipfsHash, gatewayUrl),
+      this._submitToEAS(receipt)
+    ]);
+
+    return receipt;
+  }
+
+  /**
+   * Best-effort ERC-8004 Reputation Registry submission. Never throws —
+   * failures (including "recipient not registered on ERC-8004") are logged
+   * and tracked so the reconciliation job can retry later.
+   */
+  async _submitToReputationRegistry(receipt, ipfsHash, gatewayUrl) {
+    if (!ipfsHash) {
+      this._log(`Skipping Reputation Registry submission for ${receipt.receipt_id} — no IPFS hash available`);
+      try {
+        await dataStore.saveReputationSubmission(receipt.receipt_id, {
+          status: 'failed',
+          error: 'IPFS upload failed; feedbackURI unavailable',
+          attempted_at: new Date().toISOString()
+        });
+      } catch (trackingError) {
+        this._log(`Failed to track submission error: ${trackingError.message}`);
+      }
+      return;
+    }
+
+    try {
       this._log(`Submitting attestation ${receipt.receipt_id} to Reputation Registry...`);
       await reputationService.initialize();
       const result = await reputationService.submitAttestation(receipt, ipfsHash);
       this._log(`Submitted to Reputation Registry`, result);
 
-      // Step 3: Update receipt with on-chain data
-      receipt.reputation_context.ipfs_uri = `ipfs://${ipfsHash}`;
       receipt.reputation_context.submission_index = result.feedbackIndex;
       receipt.reputation_context.submitted_at = new Date().toISOString();
       receipt.metadata.onchain_status = 'submitted';
       await dataStore.saveAttestation(receipt);
 
-      // Step 4: Track submission
       await dataStore.saveReputationSubmission(receipt.receipt_id, {
         status: 'success',
         network: reputationService.networkName,
@@ -259,7 +299,6 @@ class VerificationService {
         stack: error.stack
       });
 
-      // Track failed submission
       try {
         await dataStore.saveReputationSubmission(receipt.receipt_id, {
           status: 'failed',
@@ -270,8 +309,58 @@ class VerificationService {
         this._log(`Failed to track submission error: ${trackingError.message}`);
       }
     }
+  }
 
-    return receipt;
+  /**
+   * Best-effort EAS attestation submission — chain-anchored proof that needs
+   * no recipient pre-registration on ERC-8004 (or anywhere else). Never throws.
+   */
+  async _submitToEAS(receipt) {
+    try {
+      this._log(`Submitting attestation ${receipt.receipt_id} to EAS...`);
+      await easService.initialize();
+      const result = await easService.submitAttestation(receipt);
+      this._log(`Submitted to EAS`, result);
+
+      receipt.eas.schema_uid = easService.network.schemaUID;
+      receipt.eas.attestation_uid = result.uid;
+      receipt.eas.tx_hash = result.txHash;
+      receipt.eas.network = easService.networkName;
+      receipt.eas.explorer_url = result.explorerUrl;
+      receipt.eas.submitted_at = new Date().toISOString();
+      receipt.eas.status = 'submitted';
+      await dataStore.saveAttestation(receipt);
+
+      await dataStore.saveEasSubmission(receipt.receipt_id, {
+        status: 'success',
+        network: easService.networkName,
+        transaction_hash: result.txHash,
+        attestation_uid: result.uid,
+        schema_uid: easService.network.schemaUID,
+        submitted_at: new Date().toISOString()
+      });
+
+      this._log(`Successfully submitted attestation ${receipt.receipt_id} to EAS`);
+    } catch (error) {
+      // Log but don't fail - attestation is still valid without an EAS entry
+      const status = error.message?.startsWith('NO_WALLET:') ? 'skipped_no_wallet' : 'failed';
+      this._log(`EAS submission failed (attestation still valid)`, {
+        error: error.message,
+        status
+      });
+
+      try {
+        receipt.eas.status = status;
+        await dataStore.saveAttestation(receipt);
+        await dataStore.saveEasSubmission(receipt.receipt_id, {
+          status: 'failed',
+          error: error.message,
+          attempted_at: new Date().toISOString()
+        });
+      } catch (trackingError) {
+        this._log(`Failed to track EAS submission error: ${trackingError.message}`);
+      }
+    }
   }
 
   /**

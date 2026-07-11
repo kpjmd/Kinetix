@@ -17,7 +17,8 @@
     "platform_profiles": {
       "clawstr": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5"
     },
-    "wallet_address": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5"
+    "wallet_address": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
+    "erc8004_token_id": null
   },
   "commitment": {
     "commitment_id": "cmt_kx_51d140183427",
@@ -104,7 +105,8 @@
     "dispute_window_days": 7,
     "dispute_deadline": "2026-02-21T15:22:34.493Z",
     "onchain_status": "pending",
-    "schema_version": "1.0.0"
+    "schema_version": "1.0.0",
+    "onchain_retry_count": 0
   },
   "reputation_context": {
     "agent_id": "Kinetix",
@@ -128,5 +130,14 @@
       "chainId": 8453,
       "verifyingContract": "0x0000000000000000000000000000000000000000"
     }
+  },
+  "eas": {
+    "schema_uid": null,
+    "attestation_uid": null,
+    "tx_hash": null,
+    "network": null,
+    "explorer_url": null,
+    "submitted_at": null,
+    "status": "pending"
   }
 }

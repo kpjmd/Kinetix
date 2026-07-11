@@ -11,6 +11,8 @@ const COMMITMENTS_DIR = path.join(BASE_DATA_DIR, 'commitments');
 const ATTESTATIONS_DIR = path.join(BASE_DATA_DIR, 'attestations');
 const ERC8004_DIR = path.join(BASE_DATA_DIR, 'erc8004');
 const REPUTATION_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'erc8004/reputation-submissions');
+const EAS_DIR = path.join(BASE_DATA_DIR, 'eas');
+const EAS_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'eas/submissions');
 const X402_PAYMENTS_DIR = path.join(BASE_DATA_DIR, 'x402-payments');
 const APPROVAL_QUEUE_DIR = path.join(BASE_DATA_DIR, 'approval-queue');
 
@@ -22,6 +24,7 @@ async function ensureDirectories() {
   await fs.mkdir(ATTESTATIONS_DIR, { recursive: true });
   await fs.mkdir(ERC8004_DIR, { recursive: true });
   await fs.mkdir(REPUTATION_SUBMISSIONS_DIR, { recursive: true });
+  await fs.mkdir(EAS_SUBMISSIONS_DIR, { recursive: true });
   await fs.mkdir(X402_PAYMENTS_DIR, { recursive: true });
   await fs.mkdir(APPROVAL_QUEUE_DIR, { recursive: true });
   console.log('[DataStore] Directories initialized');
@@ -218,6 +221,35 @@ async function getERC8004TokenId(network) {
 }
 
 /**
+ * Save the ERC-8004 owner->tokenId lookup cache for a network
+ * @param {string} network - 'base_mainnet' or 'base_sepolia'
+ * @param {Object} data - { network, last_scanned_block, owner_to_token_id, updated_at }
+ * @returns {Promise<Object>}
+ */
+async function saveERC8004LookupCache(network, data) {
+  const filePath = path.join(ERC8004_DIR, `lookup-cache-${network}.json`);
+  const payload = { ...data, updated_at: new Date().toISOString() };
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+  return payload;
+}
+
+/**
+ * Load the ERC-8004 owner->tokenId lookup cache for a network
+ * @param {string} network
+ * @returns {Promise<Object|null>}
+ */
+async function loadERC8004LookupCache(network) {
+  const filePath = path.join(ERC8004_DIR, `lookup-cache-${network}.json`);
+  try {
+    const content = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
  * Save reputation submission tracking data
  * @param {string} attestationId - Receipt ID
  * @param {Object} submissionData - Submission details
@@ -264,6 +296,69 @@ async function listReputationSubmissions(status = null) {
         .filter(f => f.endsWith('.json'))
         .map(async f => {
           const content = await fs.readFile(path.join(REPUTATION_SUBMISSIONS_DIR, f), 'utf-8');
+          return JSON.parse(content);
+        })
+    );
+
+    if (status) {
+      return submissions.filter(s => s.status === status);
+    }
+    return submissions.sort((a, b) =>
+      new Date(b.updated_at) - new Date(a.updated_at)
+    );
+  } catch (error) {
+    if (error.code === 'ENOENT') return [];
+    throw error;
+  }
+}
+
+/**
+ * Save EAS submission tracking data
+ * @param {string} attestationId - Receipt ID
+ * @param {Object} submissionData - Submission details
+ * @returns {Promise<Object>}
+ */
+async function saveEasSubmission(attestationId, submissionData) {
+  const filePath = path.join(EAS_SUBMISSIONS_DIR, `${attestationId}.json`);
+  const data = {
+    attestation_id: attestationId,
+    ...submissionData,
+    updated_at: new Date().toISOString()
+  };
+  await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
+  console.log(`[DataStore] Saved EAS submission for ${attestationId}`);
+  return data;
+}
+
+/**
+ * Load EAS submission data
+ * @param {string} attestationId
+ * @returns {Promise<Object|null>}
+ */
+async function loadEasSubmission(attestationId) {
+  const filePath = path.join(EAS_SUBMISSIONS_DIR, `${attestationId}.json`);
+  try {
+    const content = await fs.readFile(filePath, 'utf-8');
+    return JSON.parse(content);
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
+/**
+ * List EAS submissions by status
+ * @param {string} status - 'success', 'failed', or null for all
+ * @returns {Promise<Array>}
+ */
+async function listEasSubmissions(status = null) {
+  try {
+    const files = await fs.readdir(EAS_SUBMISSIONS_DIR);
+    const submissions = await Promise.all(
+      files
+        .filter(f => f.endsWith('.json'))
+        .map(async f => {
+          const content = await fs.readFile(path.join(EAS_SUBMISSIONS_DIR, f), 'utf-8');
           return JSON.parse(content);
         })
     );
@@ -383,9 +478,14 @@ module.exports = {
   saveERC8004Identity,
   loadERC8004Identity,
   getERC8004TokenId,
+  saveERC8004LookupCache,
+  loadERC8004LookupCache,
   saveReputationSubmission,
   loadReputationSubmission,
   listReputationSubmissions,
+  saveEasSubmission,
+  loadEasSubmission,
+  listEasSubmissions,
   saveX402Payment,
   loadX402Payment,
   listX402Payments

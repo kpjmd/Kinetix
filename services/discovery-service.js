@@ -213,7 +213,8 @@ class DiscoveryService {
       platform_profiles: {},
       description: sv.description,
       verification_type: sv.verification_type,
-      criteria: sv.criteria
+      criteria: sv.criteria,
+      erc8004_token_id: suggestion.agent_erc8004_token_id || null
     };
 
     // Set platform profile based on source

@@ -62,7 +62,7 @@ function createVerificationRoutes(services) {
    */
   router.post('/verify', async (req, res, next) => {
     try {
-      const { agent_id, pubkey, platform_profiles, commitment, payment } = req.body;
+      const { agent_id, pubkey, platform_profiles, commitment, payment, erc8004_token_id } = req.body;
 
       if (!agent_id || !commitment || !commitment.description || !commitment.type) {
         return res.status(400).json({
@@ -78,7 +78,10 @@ function createVerificationRoutes(services) {
         verification_type: commitment.type,
         criteria: commitment.criteria || {},
         payment: payment || null,
-        start_date: commitment.start_date
+        start_date: commitment.start_date,
+        // Optional fast-path: if the requester already knows their ERC-8004 token ID,
+        // this skips the on-chain lookup during reconciliation entirely.
+        erc8004_token_id: erc8004_token_id || null
       });
 
       res.status(201).json(result);
