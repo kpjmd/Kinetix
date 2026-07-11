@@ -92,7 +92,7 @@
 - `createFacilitatorConfig()` provides JWT-based auth headers
 - All three tiers return proper 402 responses with full Bazaar discovery
 - Server runs in production mode (`X402_TEST_MODE=false`)
-- Revenue directed to: `0xD203776d8279cfcA540473a0AB6197D53c96cbaf`
+- Revenue directed to the CDP payment wallet (address resolved dynamically at runtime — see `wallet/agentkit.js`; canonical address as of 2026-07-11 is `0x8c61756f693A321777562433E19B2AabF71f5519`)
 
 **Next Steps:**
 1. Deploy server to public endpoint (railway.app, render.com, or similar)
@@ -520,7 +520,7 @@ NETWORK_ID=base-mainnet node api/x402-server.js
 
 **Owner Contact:**
 - Telegram: Check admin ID in `.env`
-- Kinetix Wallet: `0xD239173c897C24b477F96AFd544195c1606Dd691`
+- Kinetix Payment Wallet: `0x8c61756f693A321777562433E19B2AabF71f5519` (canonical as of 2026-07-11; supersedes the earlier `0xD239...691` address, which was never funded/used)
 
 **Community:**
 - Moltbook: https://www.moltbook.com/u/Kinetix

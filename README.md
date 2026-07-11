@@ -288,12 +288,46 @@ npm start
 - **Conversation Logs**: Full audit trail of all interactions
 - **Admin Controls**: Telegram-based oversight
 
+## Attestations (EAS) — Live on Base Mainnet
+
+Kinetix issues onchain-anchored reputation attestations via the [Ethereum Attestation Service](https://attest.org). The mainnet schema was registered 2026-07-11 and verified end-to-end (EAS attest + ERC-8004 `giveFeedback`):
+
+- **Schema UID**: `0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff` (registered on both `base_mainnet` and `base_sepolia` — see `config/eas/eas-config.json`)
+- **Signing**: attestations are signed by the `KINETIX_SIGNING_KEY` wallet (`utils/signing-key.js`), which is separate from the CDP/AgentKit wallet used for token payments (`wallet/agentkit.js`) — see [Two-Wallet Architecture](#two-wallet-architecture) below.
+- **Issuance**: `utils/eas-attestation.js` reads the active network's schema config; `services/verification-service.js` and `services/reconciliation-service.js` populate `receipt.eas.schema_uid` on issued receipts.
+
+### Two-Wallet Architecture
+
+Kinetix runs two independent onchain identities — do not conflate them:
+
+| Purpose | Mechanism | Env var |
+|---|---|---|
+| Attestation / ERC-8004 identity signing | Raw ethers.js signer (`utils/signing-key.js`), address `0x821a61d2C3E02446eD03285df1618639eF25D2b9` | `KINETIX_SIGNING_KEY` |
+| $KINETIX / ETH / USDC payments | Coinbase CDP managed wallet (`wallet/agentkit.js`), address `0x8c61756f693A321777562433E19B2AabF71f5519` | `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET` |
+
+The CDP payment wallet's address is resolved dynamically at runtime (persisted to `wallet-data/wallet.json`, or restored from the `WALLET_DATA` env var on ephemeral hosts like Railway) rather than hardcoded — see `wallet/agentkit.js` for the resolution logic. **Keep `WALLET_DATA` in sync on every Railway deploy**: CDP provisions a brand-new wallet whenever it isn't persisted, which is how this project accumulated several unused wallet addresses between 2026-02-05 and 2026-02-17 before standardizing on the current one.
+
+### Network Configuration
+
+Two separate env vars select the active network, since the attestation layer and the payment/x402 layer were historically wired independently:
+
+- **`NETWORK_ID`** (hyphenated, e.g. `base-mainnet` / `base-sepolia`) — read directly by `wallet/agentkit.js`, `wallet/wallet-manager.js`, `wallet/safety-controller.js`, and `api/x402/server.js`.
+- **`DEFAULT_NETWORK`** (underscored, e.g. `base_mainnet` / `base_sepolia`) — resolved via `resolveNetwork()` in `utils/network.js` and used by the EAS/ERC-8004 attestation code (`utils/eas-attestation.js`, `utils/erc8004-identity.js`, etc.).
+
+`resolveNetwork()` throws a "network split-brain" error if both vars are set and disagree, so set them to the same value together. `KINETIX`'s Base Sepolia token address is intentionally `null` in `config/safety-limits.json` (no testnet deployment) — sending KINETIX on `base-sepolia` fails closed rather than resolving to a wrong-network address.
+
+### Issuing/verifying receipts on mainnet
+
+1. Set `DEFAULT_NETWORK=base_mainnet` and `NETWORK_ID=base-mainnet` together (avoids the split-brain guard).
+2. Attestations issued via `utils/eas-attestation.js` will use the mainnet schema UID above.
+3. Verification/reconciliation services automatically stamp `receipt.eas.schema_uid` from the active network's config — no extra steps needed.
+
 ## Technology Stack
 
 - **AI**: Claude Sonnet 4.5 via Anthropic SDK
 - **Social**: Moltbook API
 - **Interface**: Telegraf (Telegram bot)
-- **Blockchain**: ethers.js on Base (Chain ID: 8453)
+- **Blockchain**: ethers.js on Base (Chain ID: 8453), EAS SDK for onchain attestations, Coinbase AgentKit for payments
 - **Knowledge**: OrthoIQ medical API
 
 ## Token Information

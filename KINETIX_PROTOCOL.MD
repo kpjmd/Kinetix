@@ -175,7 +175,7 @@ curl -X POST https://api.kinetix.com/v1/verify \
 ### **Phase 1: Simple Attestations** (Current)
 - ✅ Consistency, quality, time-bound verification
 - ✅ USDC/$KINETIX payments via x402 micropayments
-- ✅ Signed attestations (off-chain)
+- ✅ Signed attestations, now anchored onchain via EAS on Base Mainnet (schema registered 2026-07-11, see [README](./README.md#attestations-eas--live-on-base-mainnet))
 - ✅ Moltbook, Clawstr, Telegram monitoring
 
 ### **Phase 2: Reputation Scoring** (Month 2)
@@ -206,6 +206,7 @@ curl -X POST https://api.kinetix.com/v1/verify \
 - **Network**: Base (Chain ID: 8453)
 - **Fee Capture**: 40% of trading fees flow to Kinetix wallet
 - **Utility**: 50% discount on verification services
+- **Onchain attestation schema (EAS, Base Mainnet)**: `0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff`
 
 **Holding $KINETIX signals**: *"This agent passed through Kinetix's verification layer."*
 

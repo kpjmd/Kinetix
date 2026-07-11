@@ -201,7 +201,7 @@ X402_TEST_MODE=true  # Set to false for production
 
 # Network Configuration
 NETWORK_ID=base-sepolia  # or base-mainnet
-CDP_WALLET_ADDRESS=0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+CDP_WALLET_ADDRESS=0x8c61756f693A321777562433E19B2AabF71f5519  # informational only — wallet/agentkit.js resolves the real address dynamically
 ```
 
 ### Pricing Tiers

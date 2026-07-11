@@ -1,7 +1,10 @@
 const { AgentKit, CdpEvmWalletProvider } = require('@coinbase/agentkit');
 const fs = require('fs').promises;
 const path = require('path');
+const { ethers } = require('ethers');
 require('dotenv').config();
+
+const ERC20_BALANCE_ABI = ['function balanceOf(address) view returns (uint256)'];
 
 /**
  * KinetixWallet - Coinbase AgentKit wallet integration for Kinetix AI agent
@@ -160,21 +163,24 @@ class KinetixWallet {
 
     try {
       const assetLower = asset.toLowerCase();
-      let balance;
+      let formattedBalance;
 
       if (assetLower === 'eth') {
         // Get ETH balance
-        balance = await this.walletProvider.getBalance();
+        const balance = await this.walletProvider.getBalance();
+        formattedBalance = balance.toString();
       } else if (assetLower === 'usdc') {
-        // Get USDC balance
-        balance = await this.walletProvider.getBalance('usdc');
+        // CdpEvmWalletProvider.getBalance() takes no arguments and always
+        // returns the native ETH balance, so USDC needs a direct ERC-20 read.
+        const usdc = await this._getErc20Balance('usdc');
+        formattedBalance = ethers.formatUnits(usdc.raw, usdc.decimals);
       } else {
         throw new Error(`Unsupported asset: ${asset}. Supported assets: eth, usdc`);
       }
 
       const result = {
         asset: asset.toUpperCase(),
-        balance: balance.toString(),
+        balance: formattedBalance,
         address: this.address
       };
 
@@ -185,6 +191,37 @@ class KinetixWallet {
       this._log('Error getting balance', { error: error.message });
       throw error;
     }
+  }
+
+  /**
+   * Read an ERC-20 balance directly via RPC, using the per-network contract
+   * address configured in config/safety-limits.json.
+   * @param {string} assetName - Asset key in safety-limits.json (e.g. 'usdc')
+   * @returns {Promise<{raw: bigint, decimals: number}>}
+   */
+  async _getErc20Balance(assetName) {
+    const configPath = path.join(__dirname, '../config/safety-limits.json');
+    const safetyConfig = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+    const assetConfig = safetyConfig.assets[assetName];
+    if (!assetConfig) {
+      throw new Error(`No config found for asset: ${assetName}`);
+    }
+
+    const networkId = process.env.NETWORK_ID || 'base-sepolia';
+    const networkKey = networkId.replace(/-/g, '_');
+    const contractAddress = assetConfig.contractAddresses?.[networkKey];
+    if (!contractAddress) {
+      throw new Error(`No ${assetName} contract address configured for network: ${networkKey}`);
+    }
+
+    const rpcUrl = networkKey === 'base_mainnet'
+      ? (process.env.BASE_MAINNET_RPC_URL || 'https://mainnet.base.org')
+      : (process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org');
+
+    const provider = new ethers.JsonRpcProvider(rpcUrl);
+    const token = new ethers.Contract(contractAddress, ERC20_BALANCE_ABI, provider);
+    const raw = await token.balanceOf(this.address);
+    return { raw, decimals: assetConfig.decimals };
   }
 
   /**

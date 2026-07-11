@@ -37,13 +37,14 @@ This document contains Kinetix-specific addresses, configurations, and implement
 
 ### On-Chain Addresses 
 
-**Kinetix CDP EVM Wallet (Base):**
+**Kinetix CDP EVM Wallet (Base) — payments only:**
 ```
-0xD239173c897C24b477F96AFd544195c1606Dd691
+0x8c61756f693A321777562433E19B2AabF71f5519
 ```
 - Network: Base Mainnet (Chain ID: 8453)
-- Use: Agent's primary wallet for ERC-8004 registration and reputation submissions
+- Use: Agent's payment wallet ($KINETIX/ETH/USDC transfers) — resolved dynamically at runtime, see `wallet/agentkit.js`
 - Managed via: Coinbase AgentKit (CDP SDK)
+- **Correction (2026-07-11)**: this section originally (incorrectly) named `0xD239173c897C24b477F96AFd544195c1606Dd691` as the wallet used for ERC-8004 registration/reputation. The actual on-chain registration tx (`0x64cce47b...`, see above) was sent from the `KINETIX_SIGNING_KEY` wallet `0x821a61d2C3E02446eD03285df1618639eF25D2b9`, not any CDP wallet. `0xD239...691` was the earliest CDP wallet CDP ever provisioned for this project (2026-02-05) but never held funds or sent a transaction — it was superseded by other auto-provisioned CDP wallets and is not used anywhere.
 
 **$KINETIX Token Contract:**
 ```
@@ -124,7 +125,7 @@ Use this template for `config/erc8004/kinetix_metadata.json`:
   "blockchain": {
     "primary_network": "base",
     "chain_id": 8453,
-    "wallet_address": "0xD239173c897C24b477F96AFd544195c1606Dd691"
+    "wallet_address": "0x8c61756f693A321777562433E19B2AabF71f5519"
   },
 
   "token": {
@@ -270,10 +271,11 @@ Reputation Registry: 0x8004BAa17C55a88189AE136b182e5fdA19dE9b63
 ## Key Implementation Notes
 
 ### 1. Wallet Funding
-The Kinetix CDP wallet (`0xD239173c897C24b477F96AFd544195c1606Dd691`) needs Base ETH for:
+Identity registration and reputation submissions are actually signed by the `KINETIX_SIGNING_KEY` wallet (`0x821a61d2C3E02446eD03285df1618639eF25D2b9`, already funded), not the CDP wallet — that wallet needs Base ETH for:
 - Identity registration (~$0.001-0.002 one-time on Base mainnet, FREE on Sepolia testnet)
 - Reputation submissions (~$0.001-0.01 per batch on Base mainnet)
-- IPFS pinning operations
+
+The CDP wallet (`0x8c61756f693A321777562433E19B2AabF71f5519`) is separate and only needs funding for $KINETIX/ETH/USDC payment transfers. IPFS pinning is off-chain (Pinata) and needs no ETH.
 
 **Recommended:** Fund with ~$5-10 Base ETH to cover initial setup and several months of reputation submissions. Base mainnet gas fees are extremely low compared to Ethereum mainnet.
 
@@ -388,7 +390,7 @@ When implementing x402 after ERC-8004:
     },
     "payment_flow": "agent_to_agent_micropayment",
     "settlement_network": "base",
-    "settlement_address": "0xD239173c897C24b477F96AFd544195c1606Dd691"
+    "settlement_address": "0x8c61756f693A321777562433E19B2AabF71f5519"
   }
 }
 ```
@@ -450,7 +452,7 @@ When implementing x402 after ERC-8004:
 
 ### Kinetix Team
 - Admin: Keith (@kpj)
-- Wallet: `0xD239173c897C24b477F96AFd544195c1606Dd691`
+- Payment Wallet: `0x8c61756f693A321777562433E19B2AabF71f5519`
 - Contact: admin@kinetix.com
 
 ### External Resources

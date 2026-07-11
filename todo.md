@@ -1,6 +1,14 @@
 # Kinetix Agent - Development Roadmap
 
-## 📊 Current Status (Last Updated: 2026-02-18)
+## 📊 Current Status (Last Updated: 2026-07-11)
+
+### Mainnet EAS Attestations — LIVE (2026-07-11)
+
+- **Schema UID**: `0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff` (registered on both `base_mainnet` and `base_sepolia`, see `config/eas/eas-config.json`)
+- Verified end-to-end on mainnet: EAS attest + ERC-8004 `giveFeedback`
+- Security hardening pass completed pre-mainnet (`utils/network.js` split-brain guard, `utils/signing-key.js` leak-safe key handling, mandatory interactive confirmation for mainnet schema registration)
+- `KINETIX_SIGNING_KEY` now accepts a bare 64-hex-char key (auto-prepends `0x`) as well as a `0x`-prefixed one
+- **Payment-path mainnet smoke test — DONE (2026-07-11)**: canonical payment wallet resolved to `0x8c61756f693A321777562433E19B2AabF71f5519` (see History below), funded with gas ETH + 100 KINETIX, dry-run validated via `scripts/mainnet-payment-smoke-test.js`, then a real transfer executed and confirmed on-chain: **1 KINETIX → `0x821a61...25D2b9` (signing wallet), tx [`0x9267e486af1952df33cba1d5840be7d6bc55a9cb747764a7eaa8d5a79b40b595`](https://basescan.org/tx/0x9267e486af1952df33cba1d5840be7d6bc55a9cb747764a7eaa8d5a79b40b595), block 48503917, status success, gas cost ~0.0000003 ETH.** `.env`'s `NETWORK_ID`/`DEFAULT_NETWORK` remain `base-sepolia`/`base_sepolia` by default — mainnet was used via in-process override only, not a permanent env change. Also fixed a latent bug found during this test: `wallet/agentkit.js`'s `getBalance('usdc')` always returned the ETH balance mislabeled (the CDP SDK's `getBalance()` takes no asset argument) — now reads the real USDC balance via ERC-20 `balanceOf`.
 
 ### Canonical Identity & Wallets
 
@@ -10,11 +18,11 @@
 - Set via `KINETIX_SIGNING_KEY` env var on both Railway deployments
 - **Must never change** — all on-chain registrations and issued receipts reference this address
 
-**Payment / CDP Wallet:** `0xD203776d8279cfcA540473a0AB6197D53c96cbaf`
-- Receives USDC payments from x402 verification services
-- Used for on-chain transactions (AgentKit CDP)
-- Set via `WALLET_DATA={"address":"0xD203776d..."}` env var on both Railway deployments
-- Monitor: https://basescan.org/address/0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+**Payment / CDP Wallet:** `0x8c61756f693A321777562433E19B2AabF71f5519` (canonical as of 2026-07-11)
+- Receives USDC payments from x402 verification services; used for $KINETIX/ETH/USDC transfers (AgentKit CDP)
+- Set via `WALLET_DATA={"address":"0x8c61756f693A321777562433E19B2AabF71f5519"}` env var on both Railway deployments
+- Monitor: https://basescan.org/address/0x8c61756f693A321777562433E19B2AabF71f5519
+- **History**: the CDP dashboard shows numerous EOA wallets created under this project's API key between 2026-02-05 and 2026-02-17 (earliest `0xD239173c897C24b477F96AFd544195c1606Dd691`; an intermediate `0xD203776d8279cfcA540473a0AB6197D53c96cbaf` was previously documented here) — CDP appears to provision a new wallet whenever `wallet-data/wallet.json`/`WALLET_DATA` isn't persisted across a redeploy/reset. None of the prior addresses ever held funds or sent a transaction on mainnet or Sepolia (verified via `cast balance`/`cast nonce` on 2026-07-11), so nothing was lost by standardizing on the current one. **To prevent this recurring**: keep the `WALLET_DATA` Railway env var in sync with `wallet-data/wallet.json`'s current address on every deploy.
 
 ### Railway Deployments (Both Persistent)
 
@@ -24,7 +32,7 @@
 | Telegram bot | (Railway internal) | `telegram-bot/index.js` |
 
 **Railway env vars required on both services:**
-- `WALLET_DATA={"address":"0xD203776d8279cfcA540473a0AB6197D53c96cbaf"}` — prevents new wallet creation on each deploy
+- `WALLET_DATA={"address":"0x8c61756f693A321777562433E19B2AabF71f5519"}` — prevents new wallet creation on each deploy
 - `KINETIX_SIGNING_KEY=<private key>` — ensures `0x821a...` is always the attestation signer
 - `CDP_API_KEY_ID`, `CDP_API_KEY_SECRET`, `CDP_WALLET_SECRET` — CDP credentials
 
@@ -430,7 +438,7 @@ Payment Option B: $KINETIX (50% Discount)
   - Include public URL, Bazaar discovery info, pricing, and ERC-8004 token ID
 - [ ] Monitor for first autonomous payment
   - Check Railway logs: `railway logs` or in Railway dashboard
-  - Monitor wallet balance: https://basescan.org/address/0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+  - Monitor wallet balance: https://basescan.org/address/0x8c61756f693A321777562433E19B2AabF71f5519
   - Track x402 request headers in logs
   - Celebrate first payment! 🎉
 - [ ] Test agent discovery
@@ -461,7 +469,7 @@ https://kinetix-production-1a28.up.railway.app
 • Health check: https://kinetix-production-1a28.up.railway.app/health
 • Network: eip155:8453 (Base Mainnet)
 • ERC-8004 Token ID: 16892
-• Wallet: 0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+• Wallet: 0x8c61756f693A321777562433E19B2AabF71f5519
 
 💎 Features:
 ✅ On-chain ERC-8004 attestations
@@ -495,7 +503,7 @@ This is a huge step toward fully autonomous, self-sustaining AI agent operations
    curl -X GET https://api.cdp.coinbase.com/platform/v1/wallets/{wallet_id}/balances
 
    # Or check on BaseScan
-   https://basescan.org/address/0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+   https://basescan.org/address/0x8c61756f693A321777562433E19B2AabF71f5519
    ```
 
 3. **Transaction Tracking** - Look for:
