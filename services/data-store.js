@@ -262,6 +262,7 @@ async function saveReputationSubmission(attestationId, submissionData) {
     ...submissionData,
     updated_at: new Date().toISOString()
   };
+  await fs.mkdir(REPUTATION_SUBMISSIONS_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
   console.log(`[DataStore] Saved reputation submission for ${attestationId}`);
   return data;
@@ -325,6 +326,7 @@ async function saveEasSubmission(attestationId, submissionData) {
     ...submissionData,
     updated_at: new Date().toISOString()
   };
+  await fs.mkdir(EAS_SUBMISSIONS_DIR, { recursive: true });
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
   console.log(`[DataStore] Saved EAS submission for ${attestationId}`);
   return data;

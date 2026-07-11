@@ -1,17 +1,17 @@
 {
-  "_comment": "EAS is deployed via the OP Stack predeploy address on Base — same address for the EAS contract and the SchemaRegistry, on both Base mainnet and Base Sepolia. schemaUID is populated by scripts/register-eas-schema.js (one-time, irreversible per network) and is null until that script has been run.",
+  "_comment": "EAS is deployed via OP Stack predeploy addresses on Base — the EAS contract and the SchemaRegistry are two distinct predeploys, same addresses on both Base mainnet and Base Sepolia (per @ethereum-attestation-service/eas-contracts deployments). schemaUID is populated by scripts/register-eas-schema.js (one-time, irreversible per network) and is null until that script has been run.",
   "base_mainnet": {
     "easAddress": "0x4200000000000000000000000000000000000021",
-    "schemaRegistryAddress": "0x4200000000000000000000000000000000000021",
+    "schemaRegistryAddress": "0x4200000000000000000000000000000000000020",
     "schema": "string receiptId,bytes32 receiptHash,string verificationType,uint8 score,string ipfsUri",
     "schemaUID": null,
     "explorer": "https://base.easscan.org"
   },
   "base_sepolia": {
     "easAddress": "0x4200000000000000000000000000000000000021",
-    "schemaRegistryAddress": "0x4200000000000000000000000000000000000021",
+    "schemaRegistryAddress": "0x4200000000000000000000000000000000000020",
     "schema": "string receiptId,bytes32 receiptHash,string verificationType,uint8 score,string ipfsUri",
-    "schemaUID": null,
+    "schemaUID": "0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff",
     "explorer": "https://base-sepolia.easscan.org"
   }
 }
