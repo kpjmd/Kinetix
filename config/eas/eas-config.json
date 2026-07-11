@@ -4,7 +4,7 @@
     "easAddress": "0x4200000000000000000000000000000000000021",
     "schemaRegistryAddress": "0x4200000000000000000000000000000000000020",
     "schema": "string receiptId,bytes32 receiptHash,string verificationType,uint8 score,string ipfsUri",
-    "schemaUID": null,
+    "schemaUID": "0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff",
     "explorer": "https://base.easscan.org"
   },
   "base_sepolia": {

@@ -5,11 +5,16 @@
   "maxTxPerDay": 50,
   "requireApprovalAboveUSD": 5,
 
+  "_comment": "contractAddresses are keyed by network (selected by NETWORK_ID). Sending an ERC-20 transfer to the wrong network's token address is a silent-loss bug. USDC addresses are Circle's canonical Base deployments. KINETIX base_sepolia is null until its testnet address is confirmed — with a null address on the active network, transfers of that asset fail closed rather than going to a guessed address. VERIFY the KINETIX base_mainnet address against the live token at mainnet cutover.",
+
   "assets": {
     "usdc": {
       "enabled": true,
       "decimals": 6,
-      "contractAddress": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      "contractAddresses": {
+        "base_mainnet": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        "base_sepolia": "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+      },
       "priceUSD": 1.0,
       "maxPerTx": 10,
       "countTowardLimits": true,
@@ -26,7 +31,10 @@
     "kinetix": {
       "enabled": true,
       "decimals": 18,
-      "contractAddress": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+      "contractAddresses": {
+        "base_mainnet": "0x208a33Fa8A72b504b309a6869390072d712E179d",
+        "base_sepolia": null
+      },
       "priceUSD": 0.001,
       "maxPerTx": 1000,
       "countTowardLimits": false,

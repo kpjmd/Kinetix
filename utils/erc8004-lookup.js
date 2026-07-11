@@ -13,6 +13,7 @@ require('dotenv').config();
 
 const abiData = require('../config/erc8004/erc8004-abis.json');
 const dataStore = require('../services/data-store');
+const { resolveNetwork } = require('./network');
 
 const NETWORKS = {
   base_mainnet: {
@@ -100,6 +101,12 @@ async function refreshCache(network) {
     for (const event of events) {
       const agentId = event.args.agentId.toString();
       const owner = event.args.owner.toLowerCase();
+      // An owner with more than one registration: we keep the most recently
+      // scanned tokenId, but flag it — feedback would otherwise silently go to
+      // whichever token happened to be scanned last.
+      if (ownerToTokenId[owner] && ownerToTokenId[owner] !== agentId) {
+        _log(`Owner ${owner} has multiple ERC-8004 registrations (${ownerToTokenId[owner]} -> ${agentId}); keeping the newer tokenId`, { owner });
+      }
       ownerToTokenId[owner] = agentId;
     }
 
@@ -128,10 +135,7 @@ async function refreshCache(network) {
  * @returns {Promise<string|null>} token ID as a string, or null if not found
  */
 async function resolveTokenId(walletAddress, network = null) {
-  const net = network || process.env.DEFAULT_NETWORK || 'base_mainnet';
-  if (!NETWORKS[net]) {
-    throw new Error(`Unknown network: ${net}. Use base_mainnet or base_sepolia`);
-  }
+  const net = resolveNetwork(network);
   if (!walletAddress) return null;
 
   const addr = walletAddress.toLowerCase();
@@ -155,7 +159,11 @@ async function resolveTokenId(walletAddress, network = null) {
       return null;
     }
   } catch (error) {
-    _log(`ownerOf(${tokenId}) check failed, returning cached value optimistically`, { error: error.message });
+    // Fail closed: an unverified token could have been transferred, and
+    // submitting feedback to it would attribute a receipt to the wrong owner.
+    // The reconciliation retry loop will re-attempt this later.
+    _log(`ownerOf(${tokenId}) check failed — cannot confirm owner, treating as unresolved`, { error: error.message });
+    return null;
   }
 
   return tokenId;

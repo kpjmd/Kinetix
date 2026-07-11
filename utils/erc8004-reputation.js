@@ -7,6 +7,9 @@ require('dotenv').config();
 
 const abiData = require('../config/erc8004/erc8004-abis.json');
 const dataStore = require('../services/data-store');
+const { createSigner } = require('./signing-key');
+const { resolveNetwork } = require('./network');
+const { canonicalHash } = require('./receipt-canonical');
 
 const NETWORKS = {
   base_mainnet: {
@@ -49,7 +52,14 @@ class ERC8004ReputationService {
    * @param {string} networkName - 'base_mainnet' or 'base_sepolia'
    */
   async initialize(networkName = null) {
+    const network = resolveNetwork(networkName);
+
     if (this.initialized) {
+      if (this.networkName !== network) {
+        throw new Error(
+          `ERC8004ReputationService already initialized for ${this.networkName}; refusing to switch to ${network}.`
+        );
+      }
       this._log('Already initialized', {
         tokenId: this.kinetixTokenId,
         address: this.walletAddress
@@ -57,19 +67,10 @@ class ERC8004ReputationService {
       return;
     }
 
-    const network = networkName || process.env.DEFAULT_NETWORK || 'base_mainnet';
-    if (!NETWORKS[network]) {
-      throw new Error(`Unknown network: ${network}. Use base_mainnet or base_sepolia`);
-    }
-
-    const signingKey = process.env.KINETIX_SIGNING_KEY;
-    if (!signingKey) {
-      throw new Error('KINETIX_SIGNING_KEY not set in .env');
-    }
-
     this.network = NETWORKS[network];
+    this.networkName = network;
     this.provider = new ethers.JsonRpcProvider(this.network.rpc);
-    this.signer = new ethers.Wallet(signingKey, this.provider);
+    this.signer = createSigner(this.provider);
     this.walletAddress = this.signer.address;
 
     this.contract = new ethers.Contract(
@@ -101,10 +102,12 @@ class ERC8004ReputationService {
     // agentId: the recipient's ERC-8004 token ID (not Kinetix's own)
     const agentId = receipt.recipient?.erc8004_token_id;
     if (!agentId) {
-      throw new Error(
+      const err = new Error(
         `Recipient "${receipt.recipient?.agent_id}" has no erc8004_token_id. ` +
         `They must be registered on ERC-8004 for on-chain reputation submission.`
       );
+      err.code = 'NOT_REGISTERED';
+      throw err;
     }
 
     // value: overall_score (0-100)
@@ -125,9 +128,10 @@ class ERC8004ReputationService {
     // feedbackURI: ipfs:// link
     const feedbackURI = `ipfs://${ipfsHash}`;
 
-    // feedbackHash: keccak256 of receipt JSON
-    const receiptString = JSON.stringify(receipt);
-    const feedbackHash = ethers.keccak256(ethers.toUtf8Bytes(receiptString));
+    // feedbackHash: canonical, reproducible hash — the same payload the receipt
+    // signature and the EAS receiptHash commit to (not insertion-order JSON,
+    // which included the signature and mutable fields and was unreproducible).
+    const feedbackHash = canonicalHash(receipt);
 
     return {
       agentId,
@@ -139,6 +143,26 @@ class ERC8004ReputationService {
       feedbackURI,
       feedbackHash
     };
+  }
+
+  /**
+   * Throw GAS_CEILING if current gas price exceeds the configured ceiling.
+   * Ceiling is MAX_SUBMISSION_FEE_GWEI (default 50 gwei — far above Base's
+   * normal sub-gwei fees, so it only trips on abnormal spikes).
+   */
+  async _assertGasWithinCeiling() {
+    const feeData = await this.provider.getFeeData();
+    const gasPrice = feeData.maxFeePerGas || feeData.gasPrice;
+    if (!gasPrice) return; // fee data unavailable — do not block
+    const ceilingGwei = process.env.MAX_SUBMISSION_FEE_GWEI || '50';
+    const ceilingWei = ethers.parseUnits(String(ceilingGwei), 'gwei');
+    if (gasPrice > ceilingWei) {
+      const err = new Error(
+        `GAS_CEILING: gas price ${ethers.formatUnits(gasPrice, 'gwei')} gwei exceeds ceiling ${ceilingGwei} gwei — deferring submission.`
+      );
+      err.code = 'GAS_CEILING';
+      throw err;
+    }
   }
 
   /**
@@ -182,8 +206,25 @@ class ERC8004ReputationService {
    */
   isSelfVerification(receipt) {
     const recipientId = (receipt.recipient?.agent_id || '').toLowerCase();
-    return ['kinetix', 'kinetix_official'].includes(recipientId) ||
-      receipt.recipient?.pubkey === this.walletAddress;
+    if (['kinetix', 'kinetix_official'].includes(recipientId)) return true;
+
+    // Address comparison must be case-insensitive: walletAddress is EIP-55
+    // checksummed by ethers, while recipient.pubkey is user-supplied and may
+    // be lowercase. A case mismatch here previously let a self-address slip
+    // past and produce an ERC-8004 self-feedback attempt.
+    const recipientPubkey = (receipt.recipient?.pubkey || '').toLowerCase();
+    if (recipientPubkey && recipientPubkey === (this.walletAddress || '').toLowerCase()) {
+      return true;
+    }
+
+    // Also catch the case where the recipient resolves to Kinetix's own token.
+    const recipientTokenId = receipt.recipient?.erc8004_token_id;
+    if (recipientTokenId != null && this.kinetixTokenId != null &&
+        String(recipientTokenId) === String(this.kinetixTokenId)) {
+      return true;
+    }
+
+    return false;
   }
 
   /**
@@ -192,13 +233,20 @@ class ERC8004ReputationService {
    * @param {string} ipfsHash - IPFS hash of attestation
    * @returns {Promise<{feedbackIndex: string, txHash: string, blockNumber: number}>}
    */
-  async submitAttestation(receipt, ipfsHash) {
+  async submitAttestation(receipt, ipfsHash, onBroadcast = null) {
     this._ensureInitialized();
     if (this.isSelfVerification(receipt)) {
-      throw new Error('SELF_VERIFICATION: Self-feedback not allowed by ERC-8004. Kinetix cannot submit on-chain entries for its own commitments.');
+      const err = new Error('SELF_VERIFICATION: Self-feedback not allowed by ERC-8004. Kinetix cannot submit on-chain entries for its own commitments.');
+      err.code = 'SELF_VERIFICATION';
+      throw err;
     }
 
     const params = this._mapReceiptToFeedback(receipt, ipfsHash);
+
+    // Guardrail: refuse to send during a gas spike. The raw signing wallet has
+    // no SafetyController gating, so this bounds per-tx fee. Base fees are
+    // normally well under a gwei; the ceiling only trips on abnormal spikes.
+    await this._assertGasWithinCeiling();
 
     this._log('Submitting reputation feedback...', {
       agentId: params.agentId,
@@ -223,6 +271,17 @@ class ERC8004ReputationService {
         gasLimit: gasEstimate * 120n / 100n  // 20% buffer
       }
     );
+
+    // Broadcast complete but not yet confirmed — surface the hash so the caller
+    // can persist it before awaiting confirmation. If the process dies during
+    // wait(), the stored hash lets reconciliation recover instead of re-submitting.
+    if (onBroadcast) {
+      try {
+        await onBroadcast(tx.hash);
+      } catch (cbError) {
+        this._log('onBroadcast callback failed (continuing to await confirmation)', { error: cbError.message });
+      }
+    }
 
     this._log('Transaction submitted', {
       txHash: tx.hash,
@@ -281,6 +340,34 @@ class ERC8004ReputationService {
     });
 
     return { count, sum, decimals, average };
+  }
+
+  /**
+   * Recover the outcome of a previously-broadcast submission by its tx hash,
+   * without sending a new transaction. Used by reconciliation to avoid
+   * duplicate on-chain writes when a prior submit was interrupted after
+   * broadcast.
+   * @param {string} txHash
+   * @returns {Promise<{state: 'mined'|'reverted'|'pending'|'dropped', txReceipt?: Object, feedbackIndex?: string, blockNumber?: number}>}
+   */
+  async checkSubmissionByHash(txHash) {
+    this._ensureInitialized();
+    const txReceipt = await this.provider.getTransactionReceipt(txHash);
+    if (txReceipt) {
+      if (txReceipt.status === 0) {
+        return { state: 'reverted', txReceipt };
+      }
+      let feedbackIndex = null;
+      try {
+        feedbackIndex = this._parseNewFeedbackEvent(txReceipt).feedbackIndex;
+      } catch {
+        // Mined successfully but event not parseable — still not a re-submit case.
+      }
+      return { state: 'mined', txReceipt, feedbackIndex, blockNumber: txReceipt.blockNumber };
+    }
+    // No receipt yet: distinguish still-pending (in mempool) from dropped.
+    const tx = await this.provider.getTransaction(txHash);
+    return { state: tx ? 'pending' : 'dropped' };
   }
 
   /**

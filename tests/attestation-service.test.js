@@ -68,7 +68,8 @@ describe('AttestationService', () => {
       expect(receipt.signatures.receipt_hash).toMatch(/^sha256:/);
       expect(receipt.signatures.kinetix_signature).toBeTruthy();
       expect(receipt.signatures.signature_algorithm).toBe('ECDSA_secp256k1');
-      expect(receipt.signatures.eip712_domain.chainId).toBe(8453);
+      expect(receipt.signatures.signature_scheme).toBe('eip191_personal_sign(keccak256(canonical_sorted_json))');
+      expect(receipt.signatures.canonical_hash).toMatch(/^0x[0-9a-f]{64}$/);
     });
   });
 

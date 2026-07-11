@@ -7,6 +7,8 @@ const path = require('path');
 require('dotenv').config();
 
 const abiData = require('../config/erc8004/erc8004-abis.json');
+const { createSigner } = require('./signing-key');
+const { resolveNetwork } = require('./network');
 
 const NETWORKS = {
   base_mainnet: {
@@ -48,24 +50,22 @@ class ERC8004IdentityService {
    * @param {string} networkName - 'base_mainnet' or 'base_sepolia'
    */
   async initialize(networkName = null) {
+    const network = resolveNetwork(networkName);
+
     if (this.initialized) {
+      if (this.networkName !== network) {
+        throw new Error(
+          `ERC8004IdentityService already initialized for ${this.networkName}; refusing to switch to ${network}.`
+        );
+      }
       this._log('Already initialized', { address: this.walletAddress });
       return;
     }
 
-    const network = networkName || process.env.DEFAULT_NETWORK || 'base_sepolia';
-    if (!NETWORKS[network]) {
-      throw new Error(`Unknown network: ${network}. Use base_mainnet or base_sepolia`);
-    }
-
-    const signingKey = process.env.KINETIX_SIGNING_KEY;
-    if (!signingKey) {
-      throw new Error('KINETIX_SIGNING_KEY not set in .env');
-    }
-
     this.network = NETWORKS[network];
+    this.networkName = network;
     this.provider = new ethers.JsonRpcProvider(this.network.rpc);
-    this.signer = new ethers.Wallet(signingKey, this.provider);
+    this.signer = createSigner(this.provider);
     this.walletAddress = this.signer.address;
 
     this.contract = new ethers.Contract(

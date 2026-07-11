@@ -4,6 +4,8 @@
 const { ethers } = require('ethers');
 const dataStore = require('./data-store');
 const crypto = require('crypto');
+const { createSigner } = require('../utils/signing-key');
+const { canonicalString } = require('../utils/receipt-canonical');
 
 class AttestationService {
   constructor() {
@@ -23,18 +25,24 @@ class AttestationService {
    * Initialize the attestation service
    */
   async initialize() {
-    const signingKey = process.env.KINETIX_SIGNING_KEY;
+    // An ephemeral fallback key would sign receipts with the wrong issuer
+    // pubkey — unverifiable against Kinetix's published address, yet still
+    // anchored on-chain. Fail closed in production; only tests/dev may fall
+    // back, and only when explicitly opted in.
+    const allowEphemeral =
+      process.env.ALLOW_EPHEMERAL_SIGNING_KEY === 'true' ||
+      process.env.NODE_ENV === 'test';
 
-    if (!signingKey) {
-      this._log('⚠️  WARNING: KINETIX_SIGNING_KEY not set. Using ephemeral key. Receipts will NOT be verifiable across restarts.');
-      this.signingWallet = ethers.Wallet.createRandom();
-    } else {
-      try {
-        this.signingWallet = new ethers.Wallet(signingKey);
-      } catch (error) {
-        this._log('ERROR: Invalid KINETIX_SIGNING_KEY. Using ephemeral key.');
-        this.signingWallet = ethers.Wallet.createRandom();
+    try {
+      // createSigner validates the key shape and never echoes its value.
+      this.signingWallet = createSigner();
+    } catch (error) {
+      if (!allowEphemeral) {
+        // Re-throw the fixed-string error — do not silently degrade in prod.
+        throw error;
       }
+      this._log('⚠️  WARNING: signing key unavailable/invalid. Using ephemeral key (ALLOW_EPHEMERAL_SIGNING_KEY/test only). Receipts will NOT be verifiable across restarts.');
+      this.signingWallet = ethers.Wallet.createRandom();
     }
 
     this.kinetixAddress = this.signingWallet.address;
@@ -170,38 +178,23 @@ class AttestationService {
   }
 
   /**
-   * Recursively sort object keys for deterministic serialization
-   */
-  _sortedStringify(obj) {
-    if (obj === null || typeof obj !== 'object' || obj instanceof Date) {
-      return obj;
-    }
-    if (Array.isArray(obj)) {
-      return obj.map(item => this._sortedStringify(item));
-    }
-    const sorted = {};
-    Object.keys(obj).sort().forEach(key => {
-      sorted[key] = this._sortedStringify(obj[key]);
-    });
-    return sorted;
-  }
-
-  /**
-   * Sign a receipt - hash all fields except signatures, then ECDSA sign
+   * Sign a receipt over its canonical immutable payload (see
+   * utils/receipt-canonical.js). Excluding post-issuance mutable fields means
+   * the signature still verifies against the stored receipt after it has been
+   * anchored on-chain and its tracking fields have mutated.
    */
   async _signReceipt(receipt) {
-    // 1. Serialize receipt to deterministic JSON (recursively sorted keys)
-    const sortedReceipt = this._sortedStringify(receipt);
-    const receiptString = JSON.stringify(sortedReceipt);
+    // 1. Canonical deterministic JSON (sorted keys, mutable fields excluded).
+    const receiptString = canonicalString(receipt);
 
-    // 2. SHA-256 hash (human-readable)
+    // 2. SHA-256 hash (human-readable) of the same canonical bytes.
     const sha256Hash = 'sha256:' + crypto.createHash('sha256')
       .update(receiptString).digest('hex');
 
-    // 3. Keccak256 hash for signing (ethers.js standard)
+    // 3. Keccak256 of the canonical bytes — the digest that is actually signed.
     const receiptHash = ethers.keccak256(ethers.toUtf8Bytes(receiptString));
 
-    // 4. ECDSA signature
+    // 4. EIP-191 personal_sign over that digest.
     const signature = await this.signingWallet.signMessage(
       ethers.getBytes(receiptHash)
     );
@@ -210,33 +203,27 @@ class AttestationService {
       receipt_hash: sha256Hash,
       kinetix_signature: signature,
       signature_algorithm: 'ECDSA_secp256k1',
-      signed_at: new Date().toISOString(),
-      eip712_domain: {
-        name: 'KinetixProtocol',
-        version: '1',
-        chainId: 8453,
-        verifyingContract: '0x0000000000000000000000000000000000000000' // Placeholder for Phase 2
-      }
+      // Honest description of what was actually signed and how to reproduce it.
+      signature_scheme: 'eip191_personal_sign(keccak256(canonical_sorted_json))',
+      canonical_hash: receiptHash,
+      signed_at: new Date().toISOString()
     };
   }
 
   /**
-   * Verify a receipt's signature
+   * Verify a receipt's signature against its canonical payload.
    */
   verifyReceipt(receipt) {
     try {
-      // Extract signatures, rebuild receipt without them
-      const { signatures, ...receiptBody } = receipt;
-
-      // Re-serialize and hash (using same recursive sorting as signing)
-      const sortedReceipt = this._sortedStringify(receiptBody);
-      const receiptString = JSON.stringify(sortedReceipt);
+      // Hash the canonical payload — same construction as signing, and stable
+      // regardless of any post-issuance mutation to the stored receipt.
+      const receiptString = canonicalString(receipt);
       const receiptHash = ethers.keccak256(ethers.toUtf8Bytes(receiptString));
 
       // Recover signer address
       const recoveredAddress = ethers.verifyMessage(
         ethers.getBytes(receiptHash),
-        signatures.kinetix_signature
+        receipt.signatures.kinetix_signature
       );
 
       // Compare to issuer pubkey
