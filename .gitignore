@@ -21,3 +21,17 @@ data/consultation-logs/
 data/conversation-history/
 *.log
 wallet-data/wallet.json
+
+# Runtime data store — regenerated at runtime; prod persists these on the
+# Railway volume via DATA_DIR, so they should not be version-controlled.
+# NOTE: data/erc8004/identity-*.json (durable registration records) stay tracked.
+data/approval-queue/
+data/discovery-queue/
+data/attestations/
+data/commitments/
+data/eas/
+data/erc8004/reputation-submissions/
+data/erc8004/lookup-cache-*.json
+data/engagement-history.json
+data/social-state.json
+data/x402-payments/
