@@ -6,6 +6,9 @@ class SafetyController {
     this.configPath = path.resolve(configPath);
     this.statePath = path.resolve('./data/spending-state.json');
     this.approvalQueueDir = path.resolve('./data/approval-queue');
+    // Network selecting which token address to use. Normalised to underscores
+    // to match the contractAddresses keys ('base-sepolia' -> 'base_sepolia').
+    this.networkKey = (process.env.NETWORK_ID || 'base-sepolia').replace(/-/g, '_');
 
     this.config = null;
     this.state = {
@@ -53,10 +56,24 @@ class SafetyController {
     return assetLower;
   }
 
-  // Get asset configuration
+  // Get asset configuration, with contractAddress resolved for the active
+  // network. Returns null contractAddress when this asset has no address on the
+  // current network — callers must treat that as "cannot transfer" (fail closed)
+  // rather than falling back to a wrong-network address.
   getAssetConfig(asset) {
     const assetLower = asset.toLowerCase();
-    return this.config.assets[assetLower] || null;
+    const cfg = this.config.assets[assetLower];
+    if (!cfg) return null;
+    return { ...cfg, contractAddress: this._resolveContractAddress(cfg) };
+  }
+
+  // Resolve the token contract address for the active network.
+  _resolveContractAddress(cfg) {
+    if (cfg.contractAddresses) {
+      return cfg.contractAddresses[this.networkKey] || null;
+    }
+    // Legacy single-address configs (e.g. tests) still supported.
+    return cfg.contractAddress || null;
   }
 
   // Convert token amount to USD equivalent
@@ -114,8 +131,11 @@ class SafetyController {
     }
   }
 
-  // Main validation method
-  async validateTransaction(amount, asset, recipient, metadata = {}) {
+  // Main validation method.
+  // options.skipApprovalGate: when re-validating an ALREADY-approved tx at
+  // execution time, skip the "requires approval" threshold (Check 4) but still
+  // enforce every other limit (per-tx, hourly, daily, whitelist).
+  async validateTransaction(amount, asset, recipient, metadata = {}, options = {}) {
     this.resetCountersIfNeeded();
 
     const result = {
@@ -129,6 +149,7 @@ class SafetyController {
         usdPerTxLimit: false,
         dailyLimit: false,
         hourlyRate: false,
+        dailyRate: false,
         whitelist: false
       }
     };
@@ -155,8 +176,10 @@ class SafetyController {
       const usdValue = this.normalizeToUSD(amount, assetLower);
       result.usdValue = usdValue;
 
-      // Check 4: Requires approval threshold (before rejecting)
-      if (usdValue > this.config.requireApprovalAboveUSD) {
+      // Check 4: Requires approval threshold (before rejecting).
+      // Skipped when re-validating an already-approved tx at execution time —
+      // otherwise the remaining limit checks below would never run for it.
+      if (!options.skipApprovalGate && usdValue > this.config.requireApprovalAboveUSD) {
         result.requiresApproval = true;
         result.reason = 'REQUIRES_APPROVAL';
         this._log('Transaction requires approval', {
@@ -188,6 +211,17 @@ class SafetyController {
       }
       result.checks.hourlyRate = true;
 
+      // Check 6b: Daily transaction count limit (was configured but never enforced)
+      if (this.config.maxTxPerDay != null && this.state.dailyTxCount >= this.config.maxTxPerDay) {
+        result.reason = 'DAILY_TX_COUNT_EXCEEDED';
+        this._log('Validation failed: Daily tx count exceeded', {
+          count: this.state.dailyTxCount,
+          limit: this.config.maxTxPerDay
+        });
+        return result;
+      }
+      result.checks.dailyRate = true;
+
       // Check 7: Daily limit (unless countTowardLimits is false)
       if (assetConfig.countTowardLimits !== false) {
         const currentTotalUSD = this.state.dailySpending.totalUSD || 0;
@@ -204,9 +238,11 @@ class SafetyController {
       }
       result.checks.dailyLimit = true;
 
-      // Check 8: Recipient whitelist (if configured)
+      // Check 8: Recipient whitelist (if configured). Case-insensitive —
+      // addresses may be stored checksummed or lowercased.
       if (this.config.allowedRecipients.length > 0) {
-        if (!this.config.allowedRecipients.includes(recipient)) {
+        const allowed = this.config.allowedRecipients.map(a => String(a).toLowerCase());
+        if (!allowed.includes(String(recipient).toLowerCase())) {
           result.reason = 'RECIPIENT_NOT_ALLOWED';
           this._log('Validation failed: Recipient not in whitelist', { recipient });
           return result;

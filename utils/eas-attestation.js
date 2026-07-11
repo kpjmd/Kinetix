@@ -8,6 +8,9 @@ const { EAS, SchemaEncoder } = require('@ethereum-attestation-service/eas-sdk');
 require('dotenv').config();
 
 const easConfig = require('../config/eas/eas-config.json');
+const { createSigner } = require('./signing-key');
+const { resolveNetwork } = require('./network');
+const { canonicalHash } = require('./receipt-canonical');
 
 const SCHEMA_STRING = 'string receiptId,bytes32 receiptHash,string verificationType,uint8 score,string ipfsUri';
 
@@ -54,16 +57,17 @@ class EASAttestationService {
    * @param {string} networkName - 'base_mainnet' or 'base_sepolia'
    */
   async initialize(networkName = null) {
-    if (this.initialized) return;
+    const network = resolveNetwork(networkName);
 
-    const network = networkName || process.env.DEFAULT_NETWORK || 'base_mainnet';
-    if (!NETWORKS[network]) {
-      throw new Error(`Unknown network: ${network}. Use base_mainnet or base_sepolia`);
-    }
-
-    const signingKey = process.env.KINETIX_SIGNING_KEY;
-    if (!signingKey) {
-      throw new Error('KINETIX_SIGNING_KEY not set in .env');
+    if (this.initialized) {
+      // Pin to the first network initialized — refuse a silent switch that
+      // would send attestations to a different chain than the caller expects.
+      if (this.networkName !== network) {
+        throw new Error(
+          `EASAttestationService already initialized for ${this.networkName}; refusing to switch to ${network}.`
+        );
+      }
+      return;
     }
 
     if (!NETWORKS[network].schemaUID) {
@@ -75,7 +79,7 @@ class EASAttestationService {
     this.network = NETWORKS[network];
     this.networkName = network;
     this.provider = new ethers.JsonRpcProvider(this.network.rpc);
-    this.signer = new ethers.Wallet(signingKey, this.provider);
+    this.signer = createSigner(this.provider);
 
     this.eas = new EAS(this.network.easAddress);
     this.eas.connect(this.signer);
@@ -100,10 +104,15 @@ class EASAttestationService {
 
     const recipient = receipt.recipient?.wallet_address;
     if (!recipient) {
-      throw new Error(`NO_WALLET: recipient "${receipt.recipient?.agent_id}" has no wallet_address for EAS attestation.`);
+      const err = new Error(`NO_WALLET: recipient "${receipt.recipient?.agent_id}" has no wallet_address for EAS attestation.`);
+      err.code = 'NO_WALLET';
+      throw err;
     }
 
-    const receiptHash = ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(receipt)));
+    // Canonical, reproducible hash (same payload the receipt signature commits
+    // to) — not keccak of insertion-order JSON.stringify, which included the
+    // signature and mutable tracking fields and could not be reproduced later.
+    const receiptHash = canonicalHash(receipt);
 
     const data = this.schemaEncoder.encodeData([
       { name: 'receiptId', value: receipt.receipt_id, type: 'string' },
@@ -126,7 +135,11 @@ class EASAttestationService {
     });
 
     const uid = await tx.wait();
-    const txHash = tx.receipt?.hash || tx.tx?.hash || null;
+    // eas-sdk populates tx.receipt after wait(); its .hash is the tx hash.
+    const txHash = tx.receipt?.hash || null;
+    if (!txHash) {
+      this._log('WARNING: EAS attestation confirmed but no tx hash on receipt', { uid });
+    }
 
     this._log('EAS attestation submitted', { uid, txHash });
 

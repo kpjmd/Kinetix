@@ -119,31 +119,40 @@ class WalletManager {
     }
 
     // Step 3: Execute transaction
+    let txResult;
     try {
-      const txResult = await this._executeTransfer(recipient, amount, asset);
+      txResult = await this._executeTransfer(recipient, amount, asset);
+    } catch (error) {
+      this._log('Transaction execution failed', { error: error.message });
+      throw error;
+    }
 
-      // Step 4: Record in SafetyController
-      const recordId = this.safety.recordTransaction(
+    // Steps 4-5: Bookkeeping AFTER a successful broadcast MUST NOT throw — a
+    // thrown error here would surface to the caller as a failure for an
+    // already-sent tx, inviting a retry that double-spends. Log and continue.
+    let recordId = null;
+    try {
+      recordId = this.safety.recordTransaction(
         amount,
         asset,
         validation.usdValue,
         { ...metadata, txHash: txResult.hash, recipient }
       );
-
-      // Step 5: Persist state
       this.safety.saveToFile();
-
-      return {
-        status: 'executed',
+    } catch (bookkeepingError) {
+      this._log('Transaction succeeded on-chain but recording it failed', {
         hash: txResult.hash,
-        recordId,
-        usdValue: validation.usdValue,
-        explorerUrl: this._getExplorerUrl(txResult.hash)
-      };
-    } catch (error) {
-      this._log('Transaction execution failed', { error: error.message });
-      throw error;
+        error: bookkeepingError.message
+      });
     }
+
+    return {
+      status: 'executed',
+      hash: txResult.hash,
+      recordId,
+      usdValue: validation.usdValue,
+      explorerUrl: this._getExplorerUrl(txResult.hash)
+    };
   }
 
   /**
@@ -191,26 +200,72 @@ class WalletManager {
 
     const approvalData = JSON.parse(fs.readFileSync(filePath, 'utf8'));
 
-    // 2. Verify status is approved
+    // 2. Only an 'approved' tx may proceed. (Execute-once: we flip to
+    //    'executing' and persist before broadcasting, so a concurrent call
+    //    sees 'executing' and refuses rather than double-spending.)
     if (approvalData.status !== 'approved') {
       throw new Error(`Transaction ${approvalId} is not approved (status: ${approvalData.status})`);
     }
 
-    // 3. Execute the transaction
-    const { asset, amount, recipient } = approvalData.transaction;
-    const txResult = await this._executeTransfer(recipient, parseFloat(amount), asset);
+    // 3. Staleness: never execute an approval older than 24h at execution time.
+    const ageMs = Date.now() - new Date(approvalData.createdAt).getTime();
+    if (ageMs > 24 * 60 * 60 * 1000) {
+      approvalData.status = 'expired';
+      approvalData.expiredAt = new Date().toISOString();
+      fs.writeFileSync(filePath, JSON.stringify(approvalData, null, 2));
+      throw new Error(`Approval ${approvalId} expired (older than 24h) — not executed`);
+    }
 
-    // 4. Update approval file with execution details
+    const { asset, amount, recipient } = approvalData.transaction;
+
+    // 4. Re-validate against CURRENT limits (skip only the approval gate this
+    //    tx already cleared). The pre-approval path returns at the approval
+    //    threshold before checking hourly/daily/whitelist — those must still hold.
+    const revalidation = await this.safety.validateTransaction(
+      parseFloat(amount),
+      asset,
+      recipient,
+      { purpose: approvalData.transaction.purpose },
+      { skipApprovalGate: true }
+    );
+    if (!revalidation.approved) {
+      approvalData.status = 'rejected';
+      approvalData.rejectedAt = new Date().toISOString();
+      approvalData.rejectionReason = `Re-validation failed: ${revalidation.reason}`;
+      fs.writeFileSync(filePath, JSON.stringify(approvalData, null, 2));
+      throw new Error(`Transaction ${approvalId} failed re-validation: ${revalidation.reason}`);
+    }
+
+    // 5. Claim the tx: flip to 'executing' and persist BEFORE broadcasting.
+    approvalData.status = 'executing';
+    approvalData.executingAt = new Date().toISOString();
+    fs.writeFileSync(filePath, JSON.stringify(approvalData, null, 2));
+
+    // 6. Execute the transfer.
+    let txResult;
+    try {
+      txResult = await this._executeTransfer(recipient, parseFloat(amount), asset);
+    } catch (error) {
+      // Do NOT revert to 'approved' — a retry from 'approved' could double-spend
+      // if this send actually broadcast. Mark failed and require re-approval.
+      approvalData.status = 'failed';
+      approvalData.failedAt = new Date().toISOString();
+      approvalData.error = error.message;
+      fs.writeFileSync(filePath, JSON.stringify(approvalData, null, 2));
+      throw error;
+    }
+
+    // 7. Update approval file with execution details.
     approvalData.status = 'executed';
     approvalData.executedAt = new Date().toISOString();
     approvalData.txHash = txResult.hash;
     fs.writeFileSync(filePath, JSON.stringify(approvalData, null, 2));
 
-    // 5. Record in SafetyController
+    // 8. Record in SafetyController.
     const recordId = this.safety.recordTransaction(
       parseFloat(amount),
       asset,
-      approvalData.transaction.usdValue,
+      revalidation.usdValue,
       { txHash: txResult.hash, recipient, approvalId }
     );
     this.safety.saveToFile();
@@ -514,8 +569,10 @@ class WalletManager {
    */
   _getAssetByAddress(tokenAddress) {
     const normalizedAddress = tokenAddress.toLowerCase();
-    for (const [name, config] of Object.entries(this.safety.config.assets)) {
-      if (config.contractAddress?.toLowerCase() === normalizedAddress) {
+    for (const name of Object.keys(this.safety.config.assets)) {
+      // Use getAssetConfig so the address is resolved for the active network.
+      const config = this.safety.getAssetConfig(name);
+      if (config?.contractAddress?.toLowerCase() === normalizedAddress) {
         return { name, ...config };
       }
     }

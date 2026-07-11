@@ -7,6 +7,7 @@
 require('dotenv').config();
 const { ethers } = require('ethers');
 const abiData = require('../config/erc8004/erc8004-abis.json');
+const { createSigner } = require('../utils/signing-key');
 
 async function checkRegistration(network) {
   console.log(`\n=== Checking ${network.toUpperCase()} ===`);
@@ -26,7 +27,7 @@ async function checkRegistration(network) {
 
   const config = NETWORKS[network];
   const provider = new ethers.JsonRpcProvider(config.rpc);
-  const wallet = new ethers.Wallet(process.env.KINETIX_SIGNING_KEY);
+  const wallet = createSigner();
 
   console.log(`Wallet address: ${wallet.address}`);
   console.log(`Registry contract: ${config.identityRegistry}`);

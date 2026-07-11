@@ -20,10 +20,25 @@
 require('dotenv').config();
 const fs = require('fs').promises;
 const path = require('path');
+const readline = require('readline');
 const { ethers } = require('ethers');
 const { SchemaRegistry } = require('@ethereum-attestation-service/eas-sdk');
 
 const { SCHEMA_STRING } = require('../utils/eas-attestation');
+const { createSigner } = require('../utils/signing-key');
+
+/**
+ * Prompt on stdin for a typed confirmation. Returns the trimmed line.
+ */
+function prompt(question) {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise(resolve => {
+    rl.question(question, answer => {
+      rl.close();
+      resolve(answer.trim());
+    });
+  });
+}
 
 const CONFIG_PATH = path.join(__dirname, '../config/eas/eas-config.json');
 
@@ -56,17 +71,12 @@ async function main() {
     );
   }
 
-  const signingKey = process.env.KINETIX_SIGNING_KEY;
-  if (!signingKey) {
-    throw new Error('KINETIX_SIGNING_KEY not set in .env');
-  }
-
   const rpcUrl = network === 'base_mainnet'
     ? (process.env.BASE_MAINNET_RPC_URL || 'https://mainnet.base.org')
     : (process.env.BASE_SEPOLIA_RPC_URL || 'https://sepolia.base.org');
 
   const provider = new ethers.JsonRpcProvider(rpcUrl);
-  const signer = new ethers.Wallet(signingKey, provider);
+  const signer = createSigner(provider);
   log(`Signing wallet: ${signer.address}`);
 
   const balance = await provider.getBalance(signer.address);
@@ -75,10 +85,21 @@ async function main() {
     throw new Error('Wallet has zero balance — fund it with ETH for gas before registering.');
   }
 
-  if (network === 'base_mainnet' && process.env.REQUIRE_MAINNET_APPROVAL === 'true') {
-    log('\nMAINNET DEPLOYMENT (irreversible) — waiting 10 seconds before proceeding...');
-    log('Press Ctrl+C to cancel.');
-    await new Promise(resolve => setTimeout(resolve, 10000));
+  // Mainnet registration is one-time and IRREVERSIBLE. Confirm by default;
+  // only an explicit --yes flag skips the interactive gate (e.g. CI).
+  if (network === 'base_mainnet') {
+    const skip = process.argv.includes('--yes');
+    if (skip) {
+      log('\nMAINNET DEPLOYMENT (irreversible) — proceeding via --yes flag.');
+    } else {
+      log('\n⚠️  MAINNET DEPLOYMENT — this registers the EAS schema on Base mainnet.');
+      log('   This is ONE-TIME and IRREVERSIBLE for this network.');
+      const answer = await prompt(`   Type "${network}" to confirm, anything else to abort: `);
+      if (answer !== network) {
+        log('Aborted — confirmation did not match. No transaction sent.');
+        process.exit(1);
+      }
+    }
   }
 
   const schemaRegistry = new SchemaRegistry(networkConfig.schemaRegistryAddress);
@@ -112,7 +133,8 @@ main()
     process.exit(0);
   })
   .catch((error) => {
+    // Only the message — never dump the full error object, which for a
+    // signer-construction failure can contain raw key material.
     log('Schema registration failed: ' + error.message);
-    console.error(error);
     process.exit(1);
   });

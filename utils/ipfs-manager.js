@@ -7,6 +7,8 @@ const path = require('path');
 const { ethers } = require('ethers');
 require('dotenv').config();
 
+const { createSigner } = require('./signing-key');
+
 const PINATA_API_URL = 'https://api.pinata.cloud/pinning/pinJSONToIPFS';
 
 function _log(message, data = null) {
@@ -77,12 +79,7 @@ async function fetchJSON(ipfsHash) {
  * @returns {Promise<{ipfsHash: string, gatewayUrl: string, metadata: Object}>}
  */
 async function uploadAgentMetadata(network = null) {
-  const signingKey = process.env.KINETIX_SIGNING_KEY;
-  if (!signingKey) {
-    throw new Error('KINETIX_SIGNING_KEY not set in .env');
-  }
-
-  const wallet = new ethers.Wallet(signingKey);
+  const wallet = createSigner();
   const address = wallet.address;
 
   // Load metadata template

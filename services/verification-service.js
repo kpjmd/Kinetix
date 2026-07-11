@@ -238,12 +238,12 @@ class VerificationService {
       });
     }
 
-    // Week 2 Track B (ERC-8004) + EAS: independent, best-effort, run concurrently.
-    // Neither submission's success/failure may affect the other or the receipt itself.
-    await Promise.allSettled([
-      this._submitToReputationRegistry(receipt, ipfsHash, gatewayUrl),
-      this._submitToEAS(receipt)
-    ]);
+    // Week 2 Track B (ERC-8004) + EAS: independent, best-effort. Run SEQUENTIALLY,
+    // not concurrently — both are signed by the same wallet, so parallel sends
+    // race on nonce (one would fail NONCE_EXPIRED) and race on concurrent writes
+    // to this same receipt file. Each method never throws.
+    await this._submitToReputationRegistry(receipt, ipfsHash, gatewayUrl);
+    await this._submitToEAS(receipt);
 
     return receipt;
   }
@@ -271,35 +271,65 @@ class VerificationService {
     try {
       this._log(`Submitting attestation ${receipt.receipt_id} to Reputation Registry...`);
       await reputationService.initialize();
-      const result = await reputationService.submitAttestation(receipt, ipfsHash);
+
+      // Mark in-flight and record the tx hash at broadcast, so an interruption
+      // between broadcast and confirmation is recoverable by reconciliation
+      // rather than re-submitted (which would double-write on-chain).
+      receipt.metadata.onchain_status = 'submitting';
+      receipt.metadata.onchain_submitting_at = new Date().toISOString();
+      await dataStore.saveAttestation(receipt);
+
+      const result = await reputationService.submitAttestation(receipt, ipfsHash, async (txHash) => {
+        receipt.metadata.onchain_tx_hash = txHash;
+        await dataStore.saveAttestation(receipt);
+      });
       this._log(`Submitted to Reputation Registry`, result);
 
+      // Success — a persistence failure here must NOT downgrade the status to
+      // 'failed' (the tx already landed); log and keep 'submitted'.
       receipt.reputation_context.submission_index = result.feedbackIndex;
       receipt.reputation_context.submitted_at = new Date().toISOString();
       receipt.metadata.onchain_status = 'submitted';
-      await dataStore.saveAttestation(receipt);
-
-      await dataStore.saveReputationSubmission(receipt.receipt_id, {
-        status: 'success',
-        network: reputationService.networkName,
-        transaction_hash: result.txHash,
-        block_number: result.blockNumber,
-        feedback_index: result.feedbackIndex,
-        ipfs_hash: ipfsHash,
-        ipfs_uri: `ipfs://${ipfsHash}`,
-        gateway_url: gatewayUrl,
-        submitted_at: new Date().toISOString()
-      });
+      receipt.metadata.onchain_tx_hash = result.txHash;
+      try {
+        await dataStore.saveAttestation(receipt);
+        await dataStore.saveReputationSubmission(receipt.receipt_id, {
+          status: 'success',
+          network: reputationService.networkName,
+          transaction_hash: result.txHash,
+          block_number: result.blockNumber,
+          feedback_index: result.feedbackIndex,
+          ipfs_hash: ipfsHash,
+          ipfs_uri: `ipfs://${ipfsHash}`,
+          gateway_url: gatewayUrl,
+          submitted_at: new Date().toISOString()
+        });
+      } catch (persistError) {
+        this._log(`Reputation submission for ${receipt.receipt_id} landed on-chain (tx ${result.txHash}) but persisting the record failed — leaving status 'submitted'`, {
+          error: persistError.message
+        });
+      }
 
       this._log(`Successfully submitted attestation ${receipt.receipt_id} to on-chain reputation`);
     } catch (error) {
-      // Log but don't fail - attestation is still valid without on-chain submission
+      // If a tx was broadcast, leave it in-flight for reconciliation to recover
+      // by hash — do NOT mark failed, or the retry would create a duplicate.
+      if (receipt.metadata?.onchain_tx_hash && receipt.metadata?.onchain_status === 'submitting') {
+        this._log(`Reputation submission for ${receipt.receipt_id} broadcast (tx ${receipt.metadata.onchain_tx_hash}) but confirmation failed; leaving in-flight`, {
+          error: error.message
+        });
+        return;
+      }
+
+      // No tx broadcast — reset to a retryable state so reconciliation picks it up.
       this._log(`Reputation submission failed (attestation still valid)`, {
         error: error.message,
         stack: error.stack
       });
+      receipt.metadata.onchain_status = 'pending';
 
       try {
+        await dataStore.saveAttestation(receipt);
         await dataStore.saveReputationSubmission(receipt.receipt_id, {
           status: 'failed',
           error: error.message,
@@ -329,21 +359,29 @@ class VerificationService {
       receipt.eas.explorer_url = result.explorerUrl;
       receipt.eas.submitted_at = new Date().toISOString();
       receipt.eas.status = 'submitted';
-      await dataStore.saveAttestation(receipt);
 
-      await dataStore.saveEasSubmission(receipt.receipt_id, {
-        status: 'success',
-        network: easService.networkName,
-        transaction_hash: result.txHash,
-        attestation_uid: result.uid,
-        schema_uid: easService.network.schemaUID,
-        submitted_at: new Date().toISOString()
-      });
+      // Success — a persistence failure here must NOT downgrade eas.status to
+      // 'failed' (the attestation already landed on-chain); log and keep it.
+      try {
+        await dataStore.saveAttestation(receipt);
+        await dataStore.saveEasSubmission(receipt.receipt_id, {
+          status: 'success',
+          network: easService.networkName,
+          transaction_hash: result.txHash,
+          attestation_uid: result.uid,
+          schema_uid: easService.network.schemaUID,
+          submitted_at: new Date().toISOString()
+        });
+      } catch (persistError) {
+        this._log(`EAS attestation for ${receipt.receipt_id} landed on-chain (uid ${result.uid}) but persisting the record failed — leaving eas.status 'submitted'`, {
+          error: persistError.message
+        });
+      }
 
       this._log(`Successfully submitted attestation ${receipt.receipt_id} to EAS`);
     } catch (error) {
       // Log but don't fail - attestation is still valid without an EAS entry
-      const status = error.message?.startsWith('NO_WALLET:') ? 'skipped_no_wallet' : 'failed';
+      const status = (error.code === 'NO_WALLET' || error.message?.startsWith('NO_WALLET:')) ? 'skipped_no_wallet' : 'failed';
       this._log(`EAS submission failed (attestation still valid)`, {
         error: error.message,
         status
