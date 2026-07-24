@@ -21,7 +21,8 @@ class KinetixWallet {
     this.walletProvider = null;
     this.address = null;
     this.initialized = false;
-    this.walletDataPath = path.join(__dirname, '../wallet-data/wallet.json');
+    const baseDataDir = process.env.DATA_DIR || path.join(__dirname, '..');
+    this.walletDataPath = path.join(baseDataDir, 'wallet-data', 'wallet.json');
   }
 
   /**

@@ -15,6 +15,7 @@ const EAS_DIR = path.join(BASE_DATA_DIR, 'eas');
 const EAS_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'eas/submissions');
 const X402_PAYMENTS_DIR = path.join(BASE_DATA_DIR, 'x402-payments');
 const APPROVAL_QUEUE_DIR = path.join(BASE_DATA_DIR, 'approval-queue');
+const DISCOVERY_QUEUE_DIR = path.join(BASE_DATA_DIR, 'discovery-queue');
 
 /**
  * Ensure data directories exist
@@ -28,6 +29,55 @@ async function ensureDirectories() {
   await fs.mkdir(X402_PAYMENTS_DIR, { recursive: true });
   await fs.mkdir(APPROVAL_QUEUE_DIR, { recursive: true });
   console.log('[DataStore] Directories initialized');
+}
+
+/**
+ * Delete .json files older than maxAgeMs (by mtime) from a directory.
+ * Used to bound ephemeral-disk growth of queue-style directories that
+ * accumulate files with no natural expiry (e.g. discovery-queue items
+ * left unactioned). Missing directories and unreadable/non-JSON entries
+ * are skipped rather than treated as errors.
+ * @returns {Promise<number>} number of files deleted
+ */
+async function pruneOldFiles(dirPath, maxAgeMs) {
+  let files;
+  try {
+    files = await fs.readdir(dirPath);
+  } catch (e) {
+    return 0;
+  }
+
+  const cutoff = Date.now() - maxAgeMs;
+  let deleted = 0;
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    const filePath = path.join(dirPath, file);
+    try {
+      const stat = await fs.stat(filePath);
+      if (stat.mtimeMs < cutoff) {
+        await fs.unlink(filePath);
+        deleted++;
+      }
+    } catch (e) {
+      // Skip files that vanish or fail to stat/unlink concurrently
+    }
+  }
+  return deleted;
+}
+
+/**
+ * Prune stale entries from queue-style directories that never expire on
+ * their own (discovery-queue, and approval-queue items left unactioned).
+ * @returns {Promise<{dir: string, deleted: number}[]>}
+ */
+async function pruneStaleQueues(maxAgeMs = 30 * 24 * 60 * 60 * 1000) {
+  const dirs = [DISCOVERY_QUEUE_DIR, APPROVAL_QUEUE_DIR];
+  const results = [];
+  for (const dir of dirs) {
+    const deleted = await pruneOldFiles(dir, maxAgeMs);
+    results.push({ dir, deleted });
+  }
+  return results;
 }
 
 /**
@@ -469,6 +519,7 @@ async function listX402Payments(filters = {}) {
 
 module.exports = {
   ensureDirectories,
+  pruneStaleQueues,
   generateId,
   saveCommitment,
   loadCommitment,

@@ -28,13 +28,30 @@ async function _notifyAdmin(msg) {
   }
 }
 
+// Compact, length-capped one-line summary of a response body — avoid flooding
+// logs with pretty-printed JSON on repeated/high-frequency error responses.
+function _summarize(data, maxLen = 300) {
+  let str;
+  try {
+    str = JSON.stringify(data);
+  } catch (e) {
+    str = String(data);
+  }
+  if (!str) return '(empty)';
+  return str.length > maxLen ? `${str.slice(0, maxLen)}…` : str;
+}
+
+// Suppress repeated identical suspension notices — Moltbook can return the
+// same "suspended" error on every call in a polling loop.
+let _lastSuspensionNotifiedAt = 0;
+const SUSPENSION_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
+
 // Response interceptor for success responses that embed a challenge
 client.interceptors.response.use(
   response => {
     const { data } = response;
     if (data && (data.challenge || data.challenge_text || data.verification_required)) {
-      console.error('[Moltbook API] ⚠️ Challenge embedded in 2xx response - treating as challenge error');
-      console.error('[Moltbook API] Full response data:', JSON.stringify(data, null, 2));
+      console.error('[Moltbook API] ⚠️ Challenge embedded in 2xx response:', _summarize(data));
       const err = new Error(`Challenge required: ${data.challenge || data.challenge_text || 'verification_required'}`);
       err.isChallenge = true;
       err.challengeData = data;
@@ -46,23 +63,23 @@ client.interceptors.response.use(
     if (error.response) {
       const { status, data } = error.response;
 
-      console.error('[Moltbook API] Error Response:');
-      console.error(`  Status: ${status}`);
-      console.error(`  Full Data:`, JSON.stringify(data, null, 2));
+      console.error(`[Moltbook API] Error Response: status=${status} data=${_summarize(data)}`);
 
-      // Detect AI verification challenges — log ALL fields
+      // Detect AI verification challenges
       if (status === 401 || status === 403) {
         if (data.challenge || data.verification_required || data.ai_challenge) {
           console.error('[Moltbook API] ⚠️ AI VERIFICATION CHALLENGE DETECTED');
-          console.error('[Moltbook API] Full challengeData:', JSON.stringify(data, null, 2));
         }
       }
 
-      // Check for suspension messages and notify admin
+      // Check for suspension messages and notify admin (rate-limited)
       if (data.error && data.error.includes('suspended')) {
-        console.error('[Moltbook API] ⚠️ ACCOUNT SUSPENDED');
-        console.error('[Moltbook API] Reason:', data.error);
-        _notifyAdmin(`🚫 *Moltbook Account Suspended*\n\nReason: ${data.error}`);
+        const now = Date.now();
+        if (now - _lastSuspensionNotifiedAt > SUSPENSION_NOTIFY_INTERVAL_MS) {
+          _lastSuspensionNotifiedAt = now;
+          console.error('[Moltbook API] ⚠️ ACCOUNT SUSPENDED:', data.error);
+          _notifyAdmin(`🚫 *Moltbook Account Suspended*\n\nReason: ${data.error}`);
+        }
       }
     } else if (error.request) {
       console.error('[Moltbook API] No response received');

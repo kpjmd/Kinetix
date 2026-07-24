@@ -40,10 +40,13 @@ class ReconciliationService {
 
   _log(message, data = null) {
     const timestamp = new Date().toISOString();
-    console.log(`[${timestamp}] [ReconciliationService] ${message}`);
+    let line = `[${timestamp}] [ReconciliationService] ${message}`;
     if (data) {
-      console.log(JSON.stringify(data, null, 2));
+      let dataStr;
+      try { dataStr = JSON.stringify(data); } catch (e) { dataStr = String(data); }
+      line += ` ${dataStr.length > 300 ? `${dataStr.slice(0, 300)}…` : dataStr}`;
     }
+    console.log(line);
   }
 
   initialize() {
