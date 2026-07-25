@@ -11,7 +11,6 @@ class MonitoringService {
   constructor() {
     this.job = null;
     this.verificationService = null;
-    this.registeredCommitments = new Set();
   }
 
   _log(message, data = null) {
@@ -31,14 +30,6 @@ class MonitoringService {
   initialize(verificationService) {
     this.verificationService = verificationService;
     this._log('Initialized');
-  }
-
-  /**
-   * Register a commitment for monitoring
-   */
-  registerCommitment(commitmentId) {
-    this.registeredCommitments.add(commitmentId);
-    this._log(`Registered commitment ${commitmentId} for monitoring`);
   }
 
   /**

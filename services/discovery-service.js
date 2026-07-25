@@ -144,7 +144,12 @@ class DiscoveryService {
   }
 
   /**
-   * Check if a discovery is a duplicate
+   * Check if a discovery is a duplicate.
+   * Only blocks on still-pending entries with the same dedup key — once a
+   * prior suggestion has been approved or rejected, it's decided, and a new
+   * request with the same agent/claim should be allowed through again.
+   * Matching against all-time history regardless of status previously caused
+   * every request after the first to be silently dropped forever.
    */
   async _isDuplicate(dedupKey) {
     try {
@@ -152,7 +157,7 @@ class DiscoveryService {
       for (const f of files.filter(f => f.endsWith('.json'))) {
         const content = await fs.readFile(path.join(DISCOVERY_DIR, f), 'utf-8');
         const suggestion = JSON.parse(content);
-        if (suggestion.dedup_key === dedupKey) {
+        if (suggestion.dedup_key === dedupKey && suggestion.status === 'pending') {
           return true;
         }
       }

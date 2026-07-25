@@ -31,6 +31,42 @@ async function ensureDirectories() {
   console.log('[DataStore] Directories initialized');
 }
 
+const PERSISTENCE_MARKER_PATH = path.join(BASE_DATA_DIR, '.persistence-check.json');
+
+/**
+ * Write/read a boot marker under DATA_DIR to make storage continuity an
+ * observable fact in logs rather than a silent assumption. If DATA_DIR isn't
+ * set, or the volume it points at isn't actually persisted, this marker
+ * (and everything else under DATA_DIR) resets on every restart — the
+ * boot_count and first_boot_at fields make that visible immediately.
+ * @returns {Promise<{dataDir: string, usingFallbackPath: boolean, isFirstBoot: boolean, bootCount: number, firstBootAt: string}>}
+ */
+async function checkPersistence() {
+  let previous = null;
+  try {
+    const content = await fs.readFile(PERSISTENCE_MARKER_PATH, 'utf-8');
+    previous = JSON.parse(content);
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+
+  const now = new Date().toISOString();
+  const marker = {
+    first_boot_at: previous?.first_boot_at || now,
+    last_boot_at: now,
+    boot_count: (previous?.boot_count || 0) + 1
+  };
+  await fs.writeFile(PERSISTENCE_MARKER_PATH, JSON.stringify(marker, null, 2), 'utf-8');
+
+  return {
+    dataDir: BASE_DATA_DIR,
+    usingFallbackPath: !process.env.DATA_DIR,
+    isFirstBoot: !previous,
+    bootCount: marker.boot_count,
+    firstBootAt: marker.first_boot_at
+  };
+}
+
 /**
  * Delete .json files older than maxAgeMs (by mtime) from a directory.
  * Used to bound ephemeral-disk growth of queue-style directories that
@@ -519,6 +555,7 @@ async function listX402Payments(filters = {}) {
 
 module.exports = {
   ensureDirectories,
+  checkPersistence,
   pruneStaleQueues,
   generateId,
   saveCommitment,
