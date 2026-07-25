@@ -13,7 +13,7 @@ const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
 
 const app = express();
-const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0xD203776d8279cfcA540473a0AB6197D53c96cbaf';
+const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
 
 // Normalize network ID format (accept both base-sepolia and base_sepolia)
 const rawNetworkId = process.env.NETWORK_ID || 'base_sepolia';

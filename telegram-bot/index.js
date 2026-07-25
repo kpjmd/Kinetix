@@ -4,6 +4,21 @@ const path = require('path');
 const Anthropic = require('@anthropic-ai/sdk');
 require('dotenv').config();
 
+// Third-party SDKs (e.g. @coinbase/agentkit's fire-and-forget analytics calls)
+// can reject a promise nobody awaits or .catch()es. Node terminates the
+// process by default on an unhandled rejection — log and keep running
+// instead, since these are best-effort telemetry, not app logic.
+process.on('unhandledRejection', (reason) => {
+  const msg = reason instanceof Error ? reason.stack || reason.message : String(reason);
+  console.error(`[UnhandledRejection] ${msg.length > 500 ? `${msg.slice(0, 500)}…` : msg}`);
+});
+// A genuinely uncaught synchronous exception leaves process state
+// unreliable — log and exit so Railway restarts us cleanly.
+process.on('uncaughtException', (err) => {
+  console.error(`[UncaughtException] ${err.stack || err.message}`);
+  process.exit(1);
+});
+
 const moltbookApi = require('../utils/moltbook-api');
 const clawstrApi = require('../utils/clawstr-api');
 const stateManager = require('../utils/state-manager');
@@ -2060,6 +2075,22 @@ async function main() {
   const dataStore = require('../services/data-store');
   await dataStore.ensureDirectories();
   console.log('📁 Data store initialized');
+
+  // Prune stale queue files (unactioned discovery/approval items) to bound
+  // ephemeral-disk growth — once at startup, then daily.
+  const pruneQueues = async () => {
+    try {
+      const results = await dataStore.pruneStaleQueues();
+      const totalDeleted = results.reduce((sum, r) => sum + r.deleted, 0);
+      if (totalDeleted > 0) {
+        console.log(`🧹 Pruned ${totalDeleted} stale queue file(s)`);
+      }
+    } catch (e) {
+      console.error('[Prune] Failed to prune stale queues:', e.message);
+    }
+  };
+  await pruneQueues();
+  setInterval(pruneQueues, 24 * 60 * 60 * 1000);
 
   // Initialize WalletManager
   try {

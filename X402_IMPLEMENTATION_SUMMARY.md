@@ -213,7 +213,7 @@ $ curl -X POST http://localhost:3001/api/x402/verify/basic \
 X402_PORT=3001
 X402_FACILITATOR_URL=https://facilitator.x402.org
 X402_TEST_MODE=true
-CDP_WALLET_ADDRESS=0xD203776d8279cfcA540473a0AB6197D53c96cbaf
+CDP_WALLET_ADDRESS=0x8c61756f693A321777562433E19B2AabF71f5519  # informational only — wallet/agentkit.js resolves the real address dynamically
 NETWORK_ID=base-sepolia
 ```
 

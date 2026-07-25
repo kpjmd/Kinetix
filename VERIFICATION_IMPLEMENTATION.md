@@ -77,6 +77,8 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 KINETIX_SIGNING_KEY=<your_key_here>
 ```
 
+`KINETIX_SIGNING_KEY` accepts either a `0x`-prefixed or bare 64-hex-character key (the generator command above outputs bare hex) — `utils/signing-key.js` auto-prepends `0x` if missing before validating.
+
 ### 3. Run Tests
 ```bash
 npm test
