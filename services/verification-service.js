@@ -79,11 +79,6 @@ class VerificationService {
     await dataStore.saveCommitment(record);
     this._log(`Created verification ${commitmentId}`, { difficulty, verification_type: commitment.verification_type });
 
-    // Register with monitoring service
-    if (this.monitoringService) {
-      this.monitoringService.registerCommitment(commitmentId);
-    }
-
     return {
       verification_id: commitmentId,
       status: 'monitoring',

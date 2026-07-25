@@ -130,12 +130,27 @@ bot.command('status', async (ctx) => {
     const pending = await getPendingPosts();
     const conversationFiles = await fs.readdir(CONVERSATION_PATH).catch(() => []);
 
+    const dataStore = require('../services/data-store');
+    const [persistence, activeCommitments, allAttestations, pendingDiscoveries] = await Promise.all([
+      dataStore.checkPersistence(),
+      dataStore.listCommitments('active'),
+      dataStore.listAttestations(),
+      require('../services/discovery-service').listPending()
+    ]);
+    const persistenceLine = persistence.usingFallbackPath
+      ? '⚠️ Ephemeral (DATA_DIR not set — resets on restart)'
+      : `✅ Persistent (${persistence.dataDir}, boot #${persistence.bootCount})`;
+
     await ctx.reply(
       `📊 *Kinetix Status Report*\n\n` +
       `🟢 Agent: Active\n` +
       `🤖 Mode: ${agentConfig.posting_mode}\n` +
       `📝 Model: ${agentConfig.model}\n` +
       `🌡️ Temperature: ${agentConfig.temperature}\n\n` +
+      `💾 Storage: ${persistenceLine}\n` +
+      `🔎 Active Verifications: ${activeCommitments.length}\n` +
+      `✍️ Attestations Issued: ${allAttestations.length}\n` +
+      `📥 Pending Discoveries: ${pendingDiscoveries.length}\n\n` +
       `📬 Pending Approvals: ${pending.length}\n` +
       `💬 Conversation History: ${conversationFiles.length} sessions\n\n` +
       `🪙 *Tokens:*\n` +
@@ -2075,6 +2090,18 @@ async function main() {
   const dataStore = require('../services/data-store');
   await dataStore.ensureDirectories();
   console.log('📁 Data store initialized');
+
+  // Persistence self-check: makes storage continuity across restarts an
+  // observable log line instead of a silent assumption about DATA_DIR/volume.
+  const persistence = await dataStore.checkPersistence();
+  const attestationCountAtBoot = (await dataStore.listAttestations()).length;
+  if (persistence.usingFallbackPath) {
+    console.warn(`⚠️  DATA_DIR not set — using in-container fallback path ${persistence.dataDir}. Data will NOT survive redeploys/restarts.`);
+  } else if (persistence.isFirstBoot) {
+    console.log(`📁 Persistence check: first boot recorded at ${persistence.dataDir} (boot #1)`);
+  } else {
+    console.log(`📁 Persistence check: continuity confirmed — boot #${persistence.bootCount}, first seen ${persistence.firstBootAt}, ${attestationCountAtBoot} attestation(s) on disk`);
+  }
 
   // Prune stale queue files (unactioned discovery/approval items) to bound
   // ephemeral-disk growth — once at startup, then daily.
