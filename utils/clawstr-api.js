@@ -5,13 +5,77 @@
  * using the NAK CLI tool. It handles NIP-22 (subclaw) tags, multi-relay publishing, and robust error handling.
  */
 
-const { spawn, execFile } = require('child_process');
-const { promisify } = require('util');
+const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs').promises;
+const fsSync = require('fs');
 const os = require('os');
 
-const execFileAsync = promisify(execFile);
+// Where to look for the nak binary, in order, when NAK_PATH is not set.
+// scripts/install-nak-railway.sh (run from postinstall on every Railway
+// service) installs to ${NAK_INSTALL_DIR:-/app/bin}, but this module used to
+// look only in ~/go/bin — the local `go install` location. On Railway that
+// mismatch meant every nak call failed, and because getFeed swallows errors
+// and returns [], Clawstr evidence collection silently produced nothing.
+const NAK_FALLBACK_PATHS = [
+  '/app/bin/nak',
+  path.join(os.homedir(), 'go', 'bin', 'nak')
+];
+
+// Directories added to PATH for the spawned process, so a nak that resolves
+// via bare-name lookup still works.
+const NAK_PATH_DIRS = ['/app/bin', path.join(os.homedir(), 'go', 'bin')];
+
+let resolvedNakPath = null;
+
+function isExecutable(candidate) {
+  try {
+    fsSync.accessSync(candidate, fsSync.constants.X_OK);
+    return true;
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Resolve the nak binary once, and say out loud which one won.
+ * A missing binary used to surface as an empty evidence set, which is
+ * indistinguishable from "the agent did nothing" — for a paid verification
+ * that is the difference between a refund and a false negative.
+ */
+function resolveNakPath() {
+  if (resolvedNakPath) return resolvedNakPath;
+
+  // An explicit NAK_PATH always wins: a typo there should fail loudly rather
+  // than fall through to some other binary the operator did not choose.
+  if (process.env.NAK_PATH) {
+    resolvedNakPath = process.env.NAK_PATH;
+    if (!isExecutable(resolvedNakPath)) {
+      console.warn(`[NAK] NAK_PATH=${resolvedNakPath} is not executable — nak calls will fail`);
+    }
+    return resolvedNakPath;
+  }
+
+  for (const candidate of NAK_FALLBACK_PATHS) {
+    if (isExecutable(candidate)) {
+      resolvedNakPath = candidate;
+      console.log(`[NAK] Using nak at ${candidate}`);
+      return resolvedNakPath;
+    }
+  }
+
+  console.warn(
+    `[NAK] No nak binary at ${NAK_FALLBACK_PATHS.join(' or ')} — ` +
+    'falling back to a PATH lookup. Set NAK_PATH if this is wrong.'
+  );
+  resolvedNakPath = 'nak';
+  return resolvedNakPath;
+}
+
+// Test-only: clears the memoised path so a test can vary NAK_PATH.
+function _resetNakPathCache() {
+  resolvedNakPath = null;
+}
 
 // Configuration
 const CONFIG = {
@@ -22,11 +86,26 @@ const CONFIG = {
     'wss://nos.lol'
   ],
   secretKeyPath: process.env.CLAWSTR_SECRET_KEY_PATH || path.join(os.homedir(), '.clawstr', 'secret.key'),
-  nakPath: process.env.NAK_PATH || path.join(os.homedir(), 'go', 'bin', 'nak'), // Default to ~/go/bin/nak
+  // Resolved lazily so that probing the filesystem does not happen at require
+  // time, and so NAK_PATH set after import is still honoured.
+  get nakPath() { return resolveNakPath(); },
   retryAttempts: 3,
   retryDelay: 1000, // ms
   timeout: 45000 // 45 seconds
 };
+
+/**
+ * Redact secret material from an argv array before it reaches a log line or an
+ * error message. `--sec <key>` is used by the publishing commands, and
+ * `key public <secret>` derives a pubkey from the secret key.
+ */
+function redactArgs(args) {
+  return args.map((arg, i) => {
+    if (args[i - 1] === '--sec') return '***';
+    if (i === 2 && args[0] === 'key' && args[1] === 'public') return '***';
+    return arg;
+  });
+}
 
 /**
  * Load the Nostr secret key from file
@@ -51,7 +130,10 @@ async function loadSecretKey() {
 async function getPublicKey() {
   try {
     const hexPubkey = await getHexPublicKey();
-    const { stdout } = await execFileAsync(CONFIG.nakPath, ['encode', 'npub', hexPubkey]);
+    // spawnNak rather than execFile: these two used the configured path
+    // directly with no PATH augmentation, so they broke in exactly the
+    // environment the path resolution above exists to fix.
+    const { stdout } = await spawnNak(['encode', 'npub', hexPubkey], CONFIG.timeout);
     return stdout.trim();
   } catch (error) {
     throw new Error(`Failed to get public key: ${error.message}`);
@@ -64,7 +146,7 @@ async function getPublicKey() {
 async function getHexPublicKey() {
   try {
     const secretKey = await loadSecretKey();
-    const { stdout } = await execFileAsync(CONFIG.nakPath, ['key', 'public', secretKey]);
+    const { stdout } = await spawnNak(['key', 'public', secretKey], CONFIG.timeout);
     return stdout.trim();
   } catch (error) {
     throw new Error(`Failed to get hex public key: ${error.message}`);
@@ -141,10 +223,11 @@ function buildTagArgs(tags) {
  * @returns {Promise<{stdout: string, stderr: string}>}
  */
 function spawnNak(args, timeout) {
+  const nakPath = resolveNakPath();
   return new Promise((resolve, reject) => {
-    const proc = spawn(CONFIG.nakPath, args, {
+    const proc = spawn(nakPath, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, PATH: `${process.env.PATH}:${os.homedir()}/go/bin` }
+      env: { ...process.env, PATH: [process.env.PATH, ...NAK_PATH_DIRS].filter(Boolean).join(':') }
     });
 
     let stdout = '';
@@ -164,7 +247,7 @@ function spawnNak(args, timeout) {
       if (code === 0 || (!killed && stdout.trim())) {
         resolve({ stdout: stdout.trim(), stderr: stderr.trim() });
       } else {
-        const err = new Error(`Command failed: ${CONFIG.nakPath} ${args.join(' ')}\n${stderr.trim()}`);
+        const err = new Error(`Command failed: ${nakPath} ${redactArgs(args).join(' ')}\n${stderr.trim()}`);
         err.stdout = stdout;
         err.stderr = stderr;
         err.code = code;
@@ -193,9 +276,7 @@ async function executeNak(args, options = {}) {
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      // Redact secret key from log output
-      const logArgs = args.map((a, i) => args[i - 1] === '--sec' ? '***' : a);
-      console.log(`[NAK] Executing (attempt ${attempt}/${retries}): nak ${logArgs.join(' ')}`);
+      console.log(`[NAK] Executing (attempt ${attempt}/${retries}): nak ${redactArgs(args).join(' ')}`);
 
       const result = await spawnNak(args, timeout);
 
@@ -592,5 +673,7 @@ module.exports = {
   getProfile,
   getPublicKey,
   getHexPublicKey,
-  CONFIG
+  resolveNakPath,
+  CONFIG,
+  _resetNakPathCache
 };
