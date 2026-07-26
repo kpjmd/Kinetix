@@ -1,15 +1,26 @@
 // /services/monitoring-service.js
 // Periodic evidence collection from platforms
+//
+// Uses setInterval rather than node-schedule's cron string: cron minute fields
+// only range 0-59, so the previous `*/${intervalMinutes} * * * *` rule was
+// already degenerate at this service's default of 60 (it collapsed to "minute 0"
+// and only looked hourly by accident) and silently misbehaves for anything
+// larger. reconciliation-service.js made the same move for the same reason.
 
-const schedule = require('node-schedule');
 const moltbookApi = require('../utils/moltbook-api');
 const clawstrApi = require('../utils/clawstr-api');
 const dataStore = require('./data-store');
+const rules = require('../config/verification-rules.json');
 const crypto = require('crypto');
+
+// A tick re-reads every commitment JSON file, so an unbounded active set turns
+// each run into an O(all commitments) scan plus one network fetch per item.
+const MAX_PER_RUN = Number(process.env.MONITOR_MAX_PER_RUN) || 50;
 
 class MonitoringService {
   constructor() {
-    this.job = null;
+    this.timer = null;
+    this.running = false;
     this.verificationService = null;
   }
 
@@ -28,25 +39,60 @@ class MonitoringService {
    * Initialize with verification service reference
    */
   initialize(verificationService) {
+    if (!verificationService) {
+      throw new Error('MonitoringService.initialize requires a verification service');
+    }
     this.verificationService = verificationService;
     this._log('Initialized');
   }
 
   /**
-   * Start periodic monitoring
+   * Start periodic monitoring.
+   *
+   * @param {number} intervalMinutes
+   * @param {Object} [options]
+   * @param {boolean} [options.immediate=false] - run one tick right away rather
+   *   than waiting a full interval. Off by default so a tick never collides
+   *   with a cold start that is still opening sockets.
    */
-  async start(intervalMinutes = 60) {
-    const cronRule = `*/${intervalMinutes} * * * *`;
-    this.job = schedule.scheduleJob(cronRule, async () => {
-      await this.checkAllActive();
-    });
+  async start(intervalMinutes = 60, { immediate = false } = {}) {
+    // Without this the interval callback throws on this.verificationService
+    // inside a timer, where the only thing that catches it is the per-commitment
+    // handler in checkAllActive — so it would log once per commitment forever
+    // instead of failing loudly at startup.
+    if (!this.verificationService) {
+      throw new Error('MonitoringService.start called before initialize');
+    }
+    if (!Number.isFinite(intervalMinutes) || intervalMinutes <= 0) {
+      throw new Error(`Invalid monitoring interval: ${intervalMinutes}`);
+    }
+    if (this.timer) {
+      this._log('Monitoring already started, ignoring duplicate start');
+      return;
+    }
+
+    this.timer = setInterval(() => {
+      this.checkAllActive().catch(error => {
+        this._log(`Scheduled monitoring run failed: ${error.message}`);
+      });
+    }, intervalMinutes * 60 * 1000);
+    // The listening socket (x402) or the bot client keeps the process alive;
+    // this timer should never be the reason it stays up.
+    if (typeof this.timer.unref === 'function') this.timer.unref();
+
     this._log(`Monitoring started: checking every ${intervalMinutes} minutes`);
+
+    if (immediate) {
+      await this.checkAllActive().catch(error => {
+        this._log(`Initial monitoring run failed: ${error.message}`);
+      });
+    }
   }
 
   stop() {
-    if (this.job) {
-      this.job.cancel();
-      this.job = null;
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
       this._log('Monitoring stopped');
     }
   }
@@ -55,15 +101,51 @@ class MonitoringService {
    * Check all active commitments for new evidence
    */
   async checkAllActive() {
-    const activeCommitments = await dataStore.listCommitments('active');
-    this._log(`Checking ${activeCommitments.length} active commitments`);
+    // Each commitment costs a network fetch, so a slow run can outlast its
+    // interval. Overlapping runs would double-collect and race on saveCommitment.
+    if (this.running) {
+      this._log('Previous monitoring run still in progress, skipping this tick');
+      return;
+    }
+    this.running = true;
 
-    for (const commitment of activeCommitments) {
-      try {
-        await this.checkCommitment(commitment);
-      } catch (error) {
-        this._log(`Error checking commitment ${commitment.commitment_id}: ${error.message}`);
+    try {
+      const activeCommitments = await dataStore.listCommitments('active');
+
+      const maxActive = rules.monitoring?.max_active_commitments;
+      if (maxActive && activeCommitments.length > maxActive) {
+        this._log(
+          `WARNING: ${activeCommitments.length} active commitments exceeds ` +
+          `max_active_commitments (${maxActive})`
+        );
       }
+
+      // Soonest-expiring first: under the per-run cap these are the ones about
+      // to be scored, so they must never be starved by long-running commitments.
+      const queue = [...activeCommitments].sort(
+        (a, b) => new Date(a.end_date) - new Date(b.end_date)
+      );
+      const batch = queue.slice(0, MAX_PER_RUN);
+
+      if (queue.length > batch.length) {
+        this._log(
+          `Checking ${batch.length} of ${queue.length} active commitments ` +
+          `(capped at MONITOR_MAX_PER_RUN=${MAX_PER_RUN}); ` +
+          `${queue.length - batch.length} deferred to the next run`
+        );
+      } else {
+        this._log(`Checking ${batch.length} active commitments`);
+      }
+
+      for (const commitment of batch) {
+        try {
+          await this.checkCommitment(commitment);
+        } catch (error) {
+          this._log(`Error checking commitment ${commitment.commitment_id}: ${error.message}`);
+        }
+      }
+    } finally {
+      this.running = false;
     }
   }
 
