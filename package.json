@@ -20,7 +20,8 @@
     "start": "node telegram-bot/index.js",
     "dev": "nodemon telegram-bot/index.js",
     "x402:start": "node scripts/start-x402-server.js",
-    "x402:test": "X402_TEST_MODE=true node scripts/start-x402-server.js"
+    "x402:test": "X402_TEST_MODE=true node scripts/start-x402-server.js",
+    "okx:preflight": "node scripts/okx-preflight-check.js"
   },
   "keywords": [],
   "author": "",
@@ -42,6 +43,7 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "supertest": "^7.2.2"
   }
 }

@@ -27,5 +27,11 @@ process.env.NETWORK_ID = normalizedNetwork;
 
 console.log(`\n🚀 Starting Kinetix x402 server on ${normalizedNetwork}...\n`);
 
-// Start server
-require('../api/x402/server');
+// Start server. The module only self-starts when run directly (so tests can
+// import the app without binding a port), so start it explicitly here.
+const { start } = require('../api/x402/server');
+
+start().catch(error => {
+  console.error('Failed to initialize services:', error);
+  process.exit(1);
+});
