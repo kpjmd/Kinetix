@@ -181,6 +181,27 @@ describe('x402 verification server', () => {
       expect(fs.readdirSync(attestationsDir).length).toBe(before + 1);
     }, 15000);
 
+    it('exposes receipt_id on repeat polls so a buyer can fetch what they paid for', async () => {
+      const created = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: { duration_days: 0.00002 } }); // ~1.7s
+
+      await new Promise(resolve => setTimeout(resolve, 2500));
+
+      // First poll triggers scoring; the second is the one that used to return
+      // a trimmed object with no receipt_id, stranding the buyer.
+      const first = await request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`);
+      const second = await request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`);
+
+      expect(first.body.receipt_id).toBeTruthy();
+      expect(second.body.receipt_id).toBe(first.body.receipt_id);
+      expect(Object.keys(second.body).sort()).toEqual(Object.keys(first.body).sort());
+
+      const receipt = await request(server).get(`/api/v1/attestation/${second.body.receipt_id}`);
+      expect(receipt.status).toBe(200);
+      expect(receipt.body.receipt_id).toBe(second.body.receipt_id);
+    }, 15000);
+
     it('reports health with the mainnet ERC-8004 token id', async () => {
       const res = await request(server).get('/health');
 
