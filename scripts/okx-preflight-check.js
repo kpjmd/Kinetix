@@ -34,6 +34,8 @@ const VALID_PAYLOAD = {
   agent_id: 'agent_preflight_check',
   commitment_description: 'Preflight probe — not a real commitment',
   verification_type: 'consistency',
+  platform: 'moltbook',
+  platform_handle: 'preflight_probe',
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 

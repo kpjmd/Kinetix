@@ -12,6 +12,7 @@ const attestationService = require('../../services/attestation-service');
 const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
 const { createRateLimiter } = require('../../utils/rate-limiter');
+const { resolveMonitoringTarget, SUPPORTED_PLATFORMS } = require('../../utils/monitoring-target');
 
 const app = express();
 const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
@@ -120,16 +121,23 @@ const basicDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
     agent_id: "example-agent-123",
-    platform: "twitter",
-    platform_handle: "@example_agent",
+    platform: "moltbook",
+    platform_handle: "example_agent",
     commitment_description: "Daily consistency check for 7 days"
   },
   inputSchema: {
     type: 'object',
     properties: {
       agent_id: { type: 'string', description: 'Unique identifier for the agent' },
-      platform: { type: 'string', description: 'Social platform (twitter, telegram, nostr)' },
-      platform_handle: { type: 'string', description: 'Handle or username' },
+      platform: {
+        type: 'string',
+        enum: SUPPORTED_PLATFORMS,
+        description: 'Platform whose activity is monitored for evidence'
+      },
+      platform_handle: {
+        type: 'string',
+        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
+      },
       commitment_description: { type: 'string', description: 'What is being verified' }
     },
     required: ['agent_id', 'platform', 'platform_handle']
@@ -151,6 +159,8 @@ const advancedDiscovery = declareDiscoveryExtension({
   input: {
     agent_id: "example-agent-123",
     commitment_description: "Quality and consistency verification",
+    platform: "moltbook",
+    platform_handle: "example_agent",
     criteria: {
       verification_type: "consistency",
       duration_days: 14,
@@ -162,6 +172,15 @@ const advancedDiscovery = declareDiscoveryExtension({
     properties: {
       agent_id: { type: 'string', description: 'Unique identifier' },
       commitment_description: { type: 'string', description: 'What is being verified' },
+      platform: {
+        type: 'string',
+        enum: SUPPORTED_PLATFORMS,
+        description: 'Platform whose activity is monitored for evidence'
+      },
+      platform_handle: {
+        type: 'string',
+        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
+      },
       criteria: {
         type: 'object',
         properties: {
@@ -172,7 +191,7 @@ const advancedDiscovery = declareDiscoveryExtension({
         required: ['verification_type', 'duration_days']
       }
     },
-    required: ['agent_id', 'commitment_description', 'criteria']
+    required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
   },
   output: {
     example: {
@@ -190,6 +209,8 @@ const premiumDiscovery = declareDiscoveryExtension({
   input: {
     agent_id: "example-agent-123",
     commitment_description: "Full verification suite",
+    platform: "moltbook",
+    platform_handle: "example_agent",
     criteria: { duration_days: 30 },
     verification_type: "time_bound"
   },
@@ -198,6 +219,15 @@ const premiumDiscovery = declareDiscoveryExtension({
     properties: {
       agent_id: { type: 'string', description: 'Unique identifier' },
       commitment_description: { type: 'string', description: 'What is being verified' },
+      platform: {
+        type: 'string',
+        enum: SUPPORTED_PLATFORMS,
+        description: 'Platform whose activity is monitored for evidence'
+      },
+      platform_handle: {
+        type: 'string',
+        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
+      },
       verification_type: {
         type: 'string',
         enum: ['consistency', 'quality', 'time_bound'],
@@ -211,7 +241,7 @@ const premiumDiscovery = declareDiscoveryExtension({
         required: ['duration_days']
       }
     },
-    required: ['agent_id', 'commitment_description', 'criteria']
+    required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
   },
   output: {
     example: {
@@ -404,17 +434,21 @@ app.post('/api/x402/verify/basic', async (req, res) => {
       });
     }
 
+    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+    const target = resolveMonitoringTarget({ platform, platform_handle });
+
     // Extract payment metadata from x402 headers
     const paymentMetadata = createPaymentMetadata('basic', req);
 
     // Create commitment
     const commitment = {
       agent_id,
-      platform,
-      platform_handle,
+      platform_profiles: target.platform_profiles,
+      pubkey: target.pubkey,
       description: commitment_description || `Basic verification for ${agent_id}`,
       verification_type: 'consistency',
       criteria: {
+        platform: target.platform,
         frequency: 'daily',
         duration_days: pricingConfig.tiers.basic.max_duration_days,
         minimum_actions: 1
@@ -453,12 +487,12 @@ app.post('/api/x402/verify/basic', async (req, res) => {
 // Advanced verification endpoint
 app.post('/api/x402/verify/advanced', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria, erc8004_token_id } = req.body;
+    const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
       return res.status(400).json({
         error: 'Missing required fields',
-        required: ['agent_id', 'commitment_description', 'criteria']
+        required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
       });
     }
 
@@ -468,17 +502,23 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
       return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
     }
 
+    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+    const target = resolveMonitoringTarget({ platform, platform_handle });
+
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('advanced', req);
 
     // Create commitment with monitoring
     const commitment = {
       agent_id,
+      platform_profiles: target.platform_profiles,
+      pubkey: target.pubkey,
       description: commitment_description,
       verification_type: criteria.verification_type || 'consistency',
       criteria: {
         frequency: criteria.frequency || 'daily',
         ...criteria,
+        platform: target.platform,
         // Clamp last: spreading `criteria` after this would let a caller's raw
         // duration_days overwrite the cap and buy a 90-day window at tier price.
         duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days)
@@ -517,12 +557,15 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
 // Premium verification endpoint
 app.post('/api/x402/verify/premium', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria, verification_type, erc8004_token_id } = req.body;
+    const {
+      agent_id, commitment_description, criteria, verification_type,
+      platform, platform_handle, erc8004_token_id
+    } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
       return res.status(400).json({
         error: 'Missing required fields',
-        required: ['agent_id', 'commitment_description', 'criteria']
+        required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
       });
     }
 
@@ -532,16 +575,22 @@ app.post('/api/x402/verify/premium', async (req, res) => {
       return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
     }
 
+    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+    const target = resolveMonitoringTarget({ platform, platform_handle });
+
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('premium', req);
 
     // Create premium commitment (supports all verification types)
     const commitment = {
       agent_id,
+      platform_profiles: target.platform_profiles,
+      pubkey: target.pubkey,
       description: commitment_description,
       verification_type: verification_type || 'consistency',
       criteria: {
         ...criteria,
+        platform: target.platform,
         // Clamp last: spreading `criteria` after this would let a caller's raw
         // duration_days overwrite the cap and buy a 10-year window at tier price.
         duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days)

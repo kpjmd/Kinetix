@@ -90,6 +90,8 @@ async function main() {
     commitment_description:
       'Reference verification issued to seed the Kinetix OKX AI listing. Demonstrates the full receipt format.',
     verification_type: 'consistency',
+    platform: readFlag('--platform') || 'moltbook',
+    platform_handle: readFlag('--handle') || 'Kinetix',
     criteria: { duration_days: durationDays, frequency: 'daily', minimum_actions: 1 }
     // erc8004_token_id deliberately omitted: without it no on-chain
     // giveFeedback is attempted, so this run costs the $1 USDC and no gas.
