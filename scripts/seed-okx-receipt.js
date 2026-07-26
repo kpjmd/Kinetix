@@ -167,14 +167,32 @@ async function main() {
   }
   const receipt = await receiptRes.json();
 
+  // Verify the signature the same way a counterparty would, rather than
+  // asserting the receipt is valid because we just issued it.
+  const attestationService = require('../services/attestation-service');
+  let verified = false;
+  try {
+    verified = attestationService.verifyReceipt(receipt);
+  } catch (error) {
+    console.warn(`  (signature check could not run: ${error.message})`);
+  }
+
   console.log('\n─────────────────────────────────────────────');
   console.log('Receipt is live and retrievable without payment:');
   console.log(`  ${baseUrl}/api/v1/attestation/${receiptId}`);
   console.log('─────────────────────────────────────────────');
-  console.log(`  receipt_id: ${receiptId}`);
-  console.log(`  score:      ${receipt.verification?.scoring_result?.overall_score}`);
-  console.log(`  status:     ${receipt.verification?.scoring_result?.status}`);
-  console.log(`  signed:     ${receipt.signature ? 'yes' : 'no'}`);
+  console.log(`  receipt_id:  ${receiptId}`);
+  console.log(`  score:       ${receipt.verification_result?.overall_score}`);
+  console.log(`  status:      ${receipt.verification_result?.status}`);
+  console.log(`  signature:   ${receipt.signatures?.kinetix_signature ? 'present' : 'MISSING'}`);
+  console.log(`  verifies:    ${verified ? 'yes' : 'NO'}`);
+  console.log(`  issuer:      ${receipt.issuer?.pubkey}`);
+  console.log(`  ipfs:        ${receipt.reputation_context?.ipfs_uri || 'not pinned'}`);
+  console.log(`  eas:         ${receipt.eas?.status}`);
+
+  if (!verified) {
+    fail('Receipt signature did not verify — do not hand this to a reviewer.');
+  }
   console.log('\nGive that URL to the OKX reviewer.\n');
 }
 
