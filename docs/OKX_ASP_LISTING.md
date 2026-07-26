@@ -56,8 +56,9 @@ Boot-critical — the server exits or misbehaves without these:
 | `TESTNET_MODE` | `false` | Same |
 
 Needed for premium features, exercised at scoring time: `BASE_MAINNET_RPC_URL`,
-`PINATA_API_KEY`, `PINATA_SECRET_API_KEY`, `IPFS_GATEWAY`, the `ERC8004_*`
-registry addresses, `KINETIX_ERC8004_TOKEN_ID`, `KINETIX_PUBLIC_KEY`.
+`PINATA_API_KEY`, `PINATA_SECRET_API_KEY`, `IPFS_GATEWAY`,
+`ERC8004_IDENTITY_BASE_MAINNET`, `ERC8004_REPUTATION_BASE_MAINNET`,
+`KINETIX_ERC8004_TOKEN_ID`.
 
 Do **not** set: `ALLOW_EPHEMERAL_SIGNING_KEY` (would sign receipts with a
 throwaway key), `TELEGRAM_BOT_TOKEN` (keeps the bot single-instance),
