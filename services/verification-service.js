@@ -14,6 +14,8 @@ class VerificationService {
     this.rules = verificationRules;
     this.monitoringService = null;
     this.attestationService = null;
+    // In-flight scoring runs, keyed by verification id. See scoreVerification.
+    this._scoringInFlight = new Map();
   }
 
   _log(message, data = null) {
@@ -150,9 +152,34 @@ class VerificationService {
   }
 
   /**
-   * Score a verification
+   * Score a verification, collapsing concurrent calls for the same id.
+   *
+   * The "already scored" guard below is a load-check-save sequence with an
+   * await between the check and the save, so two callers arriving together
+   * both read status 'active' and both proceed — issuing two attestations and,
+   * for a recipient registered on ERC-8004, broadcasting `giveFeedback` twice
+   * for a single payment. That is reachable from the public status route,
+   * which triggers scoring for any expired commitment.
+   *
+   * This map serializes per id within the process. Scoring for a given
+   * commitment only ever runs where its data lives — each deployment has its
+   * own volume — so a cross-process lock is not needed.
    */
   async scoreVerification(verificationId) {
+    const inFlight = this._scoringInFlight.get(verificationId);
+    if (inFlight) {
+      this._log(`Scoring already in flight for ${verificationId}, joining it`);
+      return inFlight;
+    }
+
+    const run = this._scoreVerification(verificationId).finally(() => {
+      this._scoringInFlight.delete(verificationId);
+    });
+    this._scoringInFlight.set(verificationId, run);
+    return run;
+  }
+
+  async _scoreVerification(verificationId) {
     const commitment = await dataStore.loadCommitment(verificationId);
     if (!commitment) {
       throw new Error(`Commitment not found: ${verificationId}`);
