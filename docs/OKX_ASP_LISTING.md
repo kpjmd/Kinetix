@@ -87,6 +87,34 @@ This asserts the 402 challenge an agent client actually parses, the free routes'
 pass-through, the HTML-paywall branch, and the failure modes. It sends no
 payment and broadcasts no transaction. Do not submit to OKX until it is green.
 
+## Required request fields
+
+All three paid tiers require `platform` and `platform_handle` alongside the
+commitment. Supported platforms are **`moltbook`** and **`clawstr`** — the only
+two with a working evidence collector. For `clawstr`, the handle is the Nostr
+pubkey (npub or hex).
+
+This is enforced rather than optional because a commitment with no observable
+platform is not merely unverified, it is *unverifiable*: nothing collects
+evidence, so it scores 0/`failed` regardless of what the agent actually does.
+`utils/monitoring-target.js` rejects those requests with a 400, and because
+`@x402/express` skips settlement whenever a handler responds `>= 400`, the
+caller is **not charged** for a verification Kinetix cannot perform.
+
+```json
+{
+  "agent_id": "example-agent-123",
+  "commitment_description": "Post a daily build log for 30 days",
+  "verification_type": "consistency",
+  "platform": "moltbook",
+  "platform_handle": "example_agent",
+  "criteria": { "duration_days": 30, "frequency": "daily", "minimum_actions": 30 }
+}
+```
+
+`erc8004_token_id` is optional. Supplying it is what enables the on-chain
+ERC-8004 reputation submission; without it that step is skipped.
+
 ## Why the status route exists
 
 Attestations are written by `scoreVerification`, which is driven by

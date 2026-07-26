@@ -37,6 +37,8 @@ const validPayload = {
   agent_id: 'agent_test_001',
   commitment_description: 'Post a daily build log for 7 days',
   verification_type: 'consistency',
+  platform: 'moltbook',
+  platform_handle: 'some_agent',
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 
@@ -102,6 +104,54 @@ describe('x402 verification server', () => {
         .send({ ...validPayload, criteria: 'not-an-object' });
 
       expect(res.status).toBe(400);
+    });
+
+    it('refuses to sell a verification with no observable platform', async () => {
+      // Without a platform, nothing collects evidence and the verification is
+      // guaranteed to score 0/failed regardless of what the agent does. A 400
+      // here also means @x402/express skips settlement, so nobody is charged.
+      const { platform, ...withoutPlatform } = validPayload;
+      const res = await request(server).post('/api/x402/verify/premium').send(withoutPlatform);
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/platform is required/);
+    });
+
+    it('refuses a platform with no working evidence collector', async () => {
+      // monitoring-service has a telegram branch, but it falls through to
+      // "not yet implemented" and would collect nothing.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform: 'telegram' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/Unsupported platform/);
+    });
+
+    it('refuses a platform with no handle', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform_handle: '   ' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/platform_handle is required/);
+    });
+
+    it('persists the monitoring target so evidence collection can find the agent', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform: 'clawstr', platform_handle: 'npub1testhandle' });
+      expect(res.status).toBe(200);
+
+      // Read the stored commitment the way monitoring-service would.
+      const stored = JSON.parse(
+        fs.readFileSync(path.join(TEST_DATA_DIR, 'commitments', `${res.body.commitment_id}.json`), 'utf8')
+      );
+      expect(stored.criteria.platform).toBe('clawstr');
+      expect(stored.platform_profiles.clawstr).toBe('npub1testhandle');
+      // Clawstr evidence is fetched by pubkey; this is also what lets EAS
+      // resolve a recipient wallet instead of skipping.
+      expect(stored.pubkey).toBe('npub1testhandle');
     });
 
     it('clamps duration_days to the tier cap', async () => {
