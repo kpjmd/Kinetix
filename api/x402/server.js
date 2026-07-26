@@ -11,6 +11,7 @@ const verificationService = require('../../services/verification-service');
 const attestationService = require('../../services/attestation-service');
 const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
+const { createRateLimiter } = require('../../utils/rate-limiter');
 
 const app = express();
 const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
@@ -19,6 +20,13 @@ const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A32177756
 const rawNetworkId = process.env.NETWORK_ID || 'base_sepolia';
 const NETWORK_ID = rawNetworkId.replace('-', '_'); // Always use underscore for config lookups
 const chainId = pricingConfig.network[NETWORK_ID].chain_id;
+
+// Registered ERC-8004 identity. Published in the health check, the Bazaar
+// discovery metadata and the OKX ASP profile, so it is resolved once here
+// rather than inlined at each use.
+const ERC8004_TOKEN_ID = Number(
+  process.env.KINETIX_ERC8004_TOKEN_ID || (NETWORK_ID === 'base_mainnet' ? 16892 : 509)
+);
 
 // Map to CAIP-2 network format (eip155:chainId)
 // Base Mainnet (8453) -> eip155:8453, Base Sepolia (84532) -> eip155:84532
@@ -34,17 +42,67 @@ const facilitatorConfig = isMainnet
 // Parse JSON bodies
 app.use(express.json());
 
+// Cap how long any single request may occupy a connection. Without this a
+// stalled upstream (IPFS pin, RPC call during scoring) leaves the caller
+// holding an open socket with no response; agent clients read that as a hang
+// rather than a failure.
+const REQUEST_TIMEOUT_MS = 30000;
+app.use((req, res, next) => {
+  const timer = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(504).json({ error: 'Request timeout' });
+    }
+  }, REQUEST_TIMEOUT_MS);
+  res.on('close', () => clearTimeout(timer));
+  next();
+});
+
+// Abuse control for the unauthenticated free endpoints below. The paid routes
+// are gated by payment, so this is deliberately generous.
+app.use(createRateLimiter(300, 60 * 60 * 1000));
+
 // Health check (free endpoint)
 app.get('/health', (req, res) => {
   res.json({
     status: 'operational',
     agent: 'Kinetix',
-    erc8004_token_id: NETWORK_ID === 'base_mainnet' || NETWORK_ID === 'base-mainnet' ? 16892 : 509,
+    erc8004_token_id: ERC8004_TOKEN_ID,
     network: NETWORK_ID,
     wallet: KINETIX_WALLET,
     x402_network: x402NetworkName,
     timestamp: new Date().toISOString()
   });
+});
+
+// Free: retrieve an issued attestation receipt. Mirrors the same route on the
+// free API server (api/routes/verification.js) so a counterparty can audit
+// outcomes before paying for a verification.
+app.get('/api/v1/attestation/:receipt_id', async (req, res, next) => {
+  try {
+    const receipt = await dataStore.loadAttestation(req.params.receipt_id);
+    if (!receipt) {
+      return res.status(404).json({ error: 'Attestation not found' });
+    }
+    res.json(receipt);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Free: check verification status. getStatus() triggers scoring once the
+// commitment window has closed, which is what writes the attestation to this
+// process's DATA_DIR — without this route the lookup above could never find a
+// receipt, since scoring otherwise only runs in the Telegram bot process.
+app.get('/api/x402/verify/:id/status', async (req, res, next) => {
+  try {
+    const status = await verificationService.getStatus(req.params.id);
+    if (!status) {
+      return res.status(404).json({ error: 'Verification not found' });
+    }
+    res.json(status);
+  } catch (error) {
+    next(error);
+  }
 });
 
 // Initialize x402 resource server with CDP-authenticated facilitator
@@ -210,6 +268,35 @@ const protectedRoutes = {
 // Check if we should use test mode (no facilitator validation)
 const TEST_MODE = process.env.X402_TEST_MODE === 'true' || process.env.TESTNET_MODE === 'true';
 
+// Fail loudly at boot rather than silently serving a misconfigured paid
+// service. Every condition below is one that would let the deploy look healthy
+// while giving away verifications, signing receipts with the wrong key, or
+// quoting the wrong chain.
+const PRODUCTION = process.env.NODE_ENV === 'production' || process.env.OKX_LISTED === 'true';
+if (PRODUCTION) {
+  const fatal = [];
+  if (TEST_MODE) {
+    fatal.push('X402_TEST_MODE/TESTNET_MODE is enabled — payment validation would be bypassed');
+  }
+  if (!isMainnet) {
+    fatal.push(`NETWORK_ID=${rawNetworkId} resolves to chain ${chainId}, not Base mainnet (8453)`);
+  }
+  if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
+    fatal.push('CDP_API_KEY_ID/CDP_API_KEY_SECRET are required for the mainnet facilitator');
+  }
+  if (!/^0x[a-fA-F0-9]{40}$/.test(KINETIX_WALLET)) {
+    fatal.push(`CDP_WALLET_ADDRESS is not a valid address: ${KINETIX_WALLET}`);
+  }
+  if (process.env.ALLOW_EPHEMERAL_SIGNING_KEY === 'true') {
+    fatal.push('ALLOW_EPHEMERAL_SIGNING_KEY would sign receipts with a throwaway key');
+  }
+  if (fatal.length > 0) {
+    console.error('❌ Refusing to start in production with:');
+    fatal.forEach(reason => console.error(`  - ${reason}`));
+    process.exit(1);
+  }
+}
+
 if (!TEST_MODE) {
   // Apply x402 payment middleware (production mode)
   app.use(
@@ -223,7 +310,7 @@ if (!TEST_MODE) {
           version: '1.0.0',
           category: 'verification',
           tags: ['identity', 'kyc', 'reputation', 'blockchain', 'erc-8004'],
-          erc8004_token_id: NETWORK_ID === 'base_mainnet' || NETWORK_ID === 'base-mainnet' ? 16892 : 509,
+          erc8004_token_id: ERC8004_TOKEN_ID,
           supportedNetworks: [x402NetworkName],
           supportedTypes: ['consistency', 'quality', 'time_bound']
         }
@@ -239,6 +326,18 @@ if (!TEST_MODE) {
 
 // Initialize services
 async function initializeServices() {
+  // The data directories are gitignored, so they do not exist in a fresh
+  // deploy image. Without this the first paid request fails on ENOENT inside
+  // saveCommitment — after the caller has already been charged.
+  await dataStore.ensureDirectories();
+
+  const persistence = await dataStore.checkPersistence();
+  if (persistence.usingFallbackPath) {
+    console.warn('⚠ DATA_DIR is not set — commitments and attestations will be');
+    console.warn('  lost on every redeploy. Mount a volume and set DATA_DIR.');
+  }
+  console.log(`✓ Data store at ${persistence.dataDir} (boot #${persistence.bootCount})`);
+
   await attestationService.initialize();
   verificationService.initialize(null, attestationService);
   console.log('✓ Verification services initialized');
@@ -274,6 +373,23 @@ function createPaymentMetadata(tier, req) {
     transaction_hash: req.headers['x-x402-tx-hash'] || req.headers['x402-tx-hash'] || '',
     payment_timestamp: new Date().toISOString()
   };
+}
+
+/**
+ * Translate a thrown error into a response for the paid verification routes.
+ *
+ * Bad input from the caller must read as 400, not 500 — a 500 tells a
+ * marketplace reviewer the service is broken. Server faults deliberately omit
+ * `error.message`, which for an fs or RPC failure would leak container paths
+ * and internal endpoints to an anonymous caller.
+ */
+function sendVerificationError(res, tier, error) {
+  if (error.status === 400) {
+    console.warn(`${tier} verification rejected: ${error.message}`);
+    return res.status(400).json({ error: 'Invalid request', details: error.message });
+  }
+  console.error(`${tier} verification error:`, error);
+  res.status(500).json({ error: 'Verification creation failed' });
 }
 
 // Basic verification endpoint
@@ -330,8 +446,7 @@ app.post('/api/x402/verify/basic', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Basic verification error:', error);
-    res.status(500).json({ error: 'Verification creation failed', details: error.message });
+    sendVerificationError(res, 'Basic', error);
   }
 });
 
@@ -345,6 +460,12 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
         error: 'Missing required fields',
         required: ['agent_id', 'commitment_description', 'criteria']
       });
+    }
+
+    // Checked before the spread below, which would otherwise turn a string
+    // into {0:'a',1:'b',...} and hide the bad input from the service layer.
+    if (typeof criteria !== 'object' || Array.isArray(criteria)) {
+      return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
     }
 
     // Extract payment metadata
@@ -387,8 +508,7 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Advanced verification error:', error);
-    res.status(500).json({ error: 'Verification creation failed', details: error.message });
+    sendVerificationError(res, 'Advanced', error);
   }
 });
 
@@ -402,6 +522,12 @@ app.post('/api/x402/verify/premium', async (req, res) => {
         error: 'Missing required fields',
         required: ['agent_id', 'commitment_description', 'criteria']
       });
+    }
+
+    // Checked before the spread below, which would otherwise turn a string
+    // into {0:'a',1:'b',...} and hide the bad input from the service layer.
+    if (typeof criteria !== 'object' || Array.isArray(criteria)) {
+      return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
     }
 
     // Extract payment metadata
@@ -444,40 +570,65 @@ app.post('/api/x402/verify/premium', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Premium verification error:', error);
-    res.status(500).json({ error: 'Verification creation failed', details: error.message });
+    sendVerificationError(res, 'Premium', error);
   }
 });
 
 // Error handler
 app.use((err, req, res, next) => {
+  const status = err.status || 500;
+  if (status === 400) {
+    return res.status(400).json({ error: 'Invalid request', details: err.message });
+  }
   console.error('Server error:', err);
-  res.status(500).json({ error: 'Internal server error', details: err.message });
+  res.status(status).json({ error: 'Internal server error' });
 });
 
-// Start server
-const PORT = process.env.X402_PORT || 3001;
+// Start server. Railway injects $PORT and routes its public domain to it, so
+// that has to win over the local-development X402_PORT.
+const PORT = process.env.PORT || process.env.X402_PORT || 3001;
 
-initializeServices()
-  .then(() => {
-    app.listen(PORT, () => {
-      console.log(`\n=== Kinetix x402 Verification Service ===`);
-      console.log(`✓ Server listening on port ${PORT}`);
-      console.log(`✓ Network: ${NETWORK_ID} (Chain ID: ${chainId})`);
-      console.log(`✓ x402 Network: ${x402NetworkName}`);
-      console.log(`✓ Receiving payments at: ${KINETIX_WALLET}`);
-      console.log(`✓ Facilitator: ${facilitatorConfig.url}`);
-      console.log(`\nEndpoints:`);
-      console.log(`  GET  /health                      - Free health check`);
-      console.log(`  POST /api/x402/verify/basic       - $${pricingConfig.tiers.basic.price_usdc} USDC`);
-      console.log(`  POST /api/x402/verify/advanced    - $${pricingConfig.tiers.advanced.price_usdc} USDC`);
-      console.log(`  POST /api/x402/verify/premium     - $${pricingConfig.tiers.premium.price_usdc} USDC`);
-      console.log(`\nReady for autonomous agent payments!\n`);
+function start() {
+  return initializeServices()
+    .then(() => {
+      const server = app.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n=== Kinetix x402 Verification Service ===`);
+        console.log(`✓ Server listening on port ${PORT}`);
+        console.log(`✓ Network: ${NETWORK_ID} (Chain ID: ${chainId})`);
+        console.log(`✓ x402 Network: ${x402NetworkName}`);
+        console.log(`✓ Receiving payments at: ${KINETIX_WALLET}`);
+        console.log(`✓ ERC-8004 token ID: ${ERC8004_TOKEN_ID}`);
+        console.log(`✓ Facilitator: ${facilitatorConfig.url || 'CDP (authenticated)'}`);
+        console.log(`\nEndpoints:`);
+        console.log(`  GET  /health                          - Free health check`);
+        console.log(`  GET  /api/v1/attestation/:receipt_id  - Free receipt lookup`);
+        console.log(`  GET  /api/x402/verify/:id/status      - Free status check`);
+        console.log(`  POST /api/x402/verify/basic           - $${pricingConfig.tiers.basic.price_usdc} USDC`);
+        console.log(`  POST /api/x402/verify/advanced        - $${pricingConfig.tiers.advanced.price_usdc} USDC`);
+        console.log(`  POST /api/x402/verify/premium         - $${pricingConfig.tiers.premium.price_usdc} USDC`);
+        console.log(`\nReady for autonomous agent payments!\n`);
+      });
+
+      // keepAliveTimeout must exceed the upstream proxy's idle timeout,
+      // otherwise Railway reuses a connection Node has already closed and the
+      // caller sees a 502.
+      server.requestTimeout = 35000;
+      server.headersTimeout = 40000;
+      server.keepAliveTimeout = 65000;
+
+      return server;
     });
-  })
-  .catch(error => {
+}
+
+// Only self-start when run directly, so tests can import the app and drive it
+// over HTTP without binding a port.
+if (require.main === module) {
+  start().catch(error => {
     console.error('Failed to initialize services:', error);
     process.exit(1);
   });
+}
 
 module.exports = app;
+module.exports.start = start;
+module.exports.initializeServices = initializeServices;

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const ipfsManager = require('../utils/ipfs-manager');
 const reputationService = require('../utils/erc8004-reputation');
 const easService = require('../utils/eas-attestation');
+const { ValidationError } = require('../utils/validation-error');
 
 class VerificationService {
   constructor() {
@@ -751,13 +752,25 @@ class VerificationService {
   }
 
   _validateCommitment(commitment) {
-    if (!commitment.agent_id) throw new Error('agent_id is required');
-    if (!commitment.description) throw new Error('description is required');
-    if (!commitment.verification_type) throw new Error('verification_type is required');
+    if (!commitment.agent_id) throw new ValidationError('agent_id is required');
+    if (!commitment.description) throw new ValidationError('description is required');
+    if (!commitment.verification_type) throw new ValidationError('verification_type is required');
     if (!['consistency', 'quality', 'time_bound'].includes(commitment.verification_type)) {
-      throw new Error(`Invalid verification_type: ${commitment.verification_type}`);
+      throw new ValidationError(`Invalid verification_type: ${commitment.verification_type}`);
     }
-    if (!commitment.criteria) throw new Error('criteria is required');
+    if (!commitment.criteria) throw new ValidationError('criteria is required');
+    if (typeof commitment.criteria !== 'object' || Array.isArray(commitment.criteria)) {
+      throw new ValidationError('criteria must be an object');
+    }
+    // Guarded here rather than at the callers: a non-numeric duration reaches
+    // `new Date(NaN).toISOString()` in createVerification and throws a
+    // RangeError, and a negative one silently yields an end_date in the past.
+    if (commitment.criteria.duration_days !== undefined) {
+      const days = Number(commitment.criteria.duration_days);
+      if (!Number.isFinite(days) || days <= 0) {
+        throw new ValidationError('criteria.duration_days must be a positive number');
+      }
+    }
   }
 
   _validateEvidence(evidence, platform) {

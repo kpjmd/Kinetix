@@ -3,6 +3,7 @@
 
 const express = require('express');
 const verificationRoutes = require('./routes/verification');
+const { createRateLimiter } = require('../utils/rate-limiter');
 
 /**
  * Create and configure the Express API server
@@ -39,34 +40,6 @@ function createApiServer(services) {
   });
 
   return app;
-}
-
-/**
- * Simple in-memory rate limiter
- */
-function createRateLimiter(maxRequests, windowMs) {
-  const requests = new Map(); // IP -> { count, resetTime }
-
-  return (req, res, next) => {
-    const ip = req.ip || req.connection.remoteAddress;
-    const now = Date.now();
-    const entry = requests.get(ip);
-
-    if (!entry || now > entry.resetTime) {
-      requests.set(ip, { count: 1, resetTime: now + windowMs });
-      return next();
-    }
-
-    if (entry.count >= maxRequests) {
-      return res.status(429).json({
-        error: 'Rate limit exceeded',
-        retry_after: Math.ceil((entry.resetTime - now) / 1000)
-      });
-    }
-
-    entry.count++;
-    next();
-  };
 }
 
 module.exports = { createApiServer };
