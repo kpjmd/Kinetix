@@ -93,16 +93,20 @@ class VerificationService {
    * Get status of a verification
    */
   async getStatus(verificationId) {
-    const commitment = await dataStore.loadCommitment(verificationId);
+    let commitment = await dataStore.loadCommitment(verificationId);
     if (!commitment) return null;
 
     // Check if expired and needs scoring
     if (commitment.status === 'active' && new Date() >= new Date(commitment.end_date)) {
       this._log(`Commitment ${verificationId} has expired, triggering scoring`);
       await this.scoreVerification(verificationId);
-      return await dataStore.loadCommitment(verificationId);
+      commitment = await dataStore.loadCommitment(verificationId);
     }
 
+    // One shape for both paths. This previously returned the whole commitment
+    // when it had just triggered scoring and the trimmed object otherwise —
+    // and only the former carried receipt_id, so a buyer who polled twice
+    // could never learn the id of the receipt they had paid for.
     return {
       verification_id: commitment.commitment_id,
       status: commitment.status,
@@ -110,7 +114,8 @@ class VerificationService {
       evidence_count: commitment.evidence.length,
       created_at: commitment.created_at,
       end_date: commitment.end_date,
-      scoring_result: commitment.scoring_result
+      scoring_result: commitment.scoring_result,
+      receipt_id: commitment.receipt_id || null
     };
   }
 
