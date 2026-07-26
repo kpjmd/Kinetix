@@ -477,9 +477,11 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
       description: commitment_description,
       verification_type: criteria.verification_type || 'consistency',
       criteria: {
-        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days),
         frequency: criteria.frequency || 'daily',
-        ...criteria
+        ...criteria,
+        // Clamp last: spreading `criteria` after this would let a caller's raw
+        // duration_days overwrite the cap and buy a 90-day window at tier price.
+        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days)
       },
       payment: paymentMetadata,
       erc8004_token_id: erc8004_token_id || null
@@ -539,8 +541,10 @@ app.post('/api/x402/verify/premium', async (req, res) => {
       description: commitment_description,
       verification_type: verification_type || 'consistency',
       criteria: {
-        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days),
-        ...criteria
+        ...criteria,
+        // Clamp last: spreading `criteria` after this would let a caller's raw
+        // duration_days overwrite the cap and buy a 10-year window at tier price.
+        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days)
       },
       payment: paymentMetadata,
       erc8004_token_id: erc8004_token_id || null

@@ -104,6 +104,21 @@ describe('x402 verification server', () => {
       expect(res.status).toBe(400);
     });
 
+    it('clamps duration_days to the tier cap', async () => {
+      // The clamp used to be overwritten by a later spread of the caller's
+      // criteria, so a tier cap could be bought past at tier price.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: { ...validPayload.criteria, duration_days: 3650 } });
+
+      expect(res.status).toBe(200);
+
+      const status = await request(server).get(`/api/x402/verify/${res.body.commitment_id}/status`);
+      const windowDays =
+        (new Date(status.body.end_date) - new Date(status.body.created_at)) / (24 * 60 * 60 * 1000);
+      expect(Math.round(windowDays)).toBe(90);
+    });
+
     it('never echoes internal error detail on a server fault', async () => {
       // Anything that does reach a 500 must not carry error.message, which for
       // an fs or RPC failure leaks container paths to an anonymous caller.
@@ -140,6 +155,31 @@ describe('x402 verification server', () => {
       expect(res.status).toBe(200);
       expect(res.body.verification_id).toBe(created.body.commitment_id);
     });
+
+    it('scores an expired commitment exactly once under concurrent polls', async () => {
+      // The status route triggers scoring, and scoring issues the attestation
+      // and (for an ERC-8004-registered recipient) broadcasts giveFeedback.
+      // Without serialization, simultaneous polls each ran the whole path —
+      // two receipts and two transactions for one payment.
+      const attestationsDir = path.join(TEST_DATA_DIR, 'attestations');
+      const before = fs.readdirSync(attestationsDir).length;
+
+      const created = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: { duration_days: 0.00002 } }); // ~1.7s
+      expect(created.status).toBe(200);
+
+      await new Promise(resolve => setTimeout(resolve, 2500));
+
+      const polls = await Promise.all(
+        Array.from({ length: 5 }, () =>
+          request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`)
+        )
+      );
+
+      polls.forEach(res => expect(res.status).toBe(200));
+      expect(fs.readdirSync(attestationsDir).length).toBe(before + 1);
+    }, 15000);
 
     it('reports health with the mainnet ERC-8004 token id', async () => {
       const res = await request(server).get('/health');
