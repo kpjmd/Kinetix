@@ -18,12 +18,25 @@
  * ETH for gas.
  *
  * Usage:
- *   export SEED_PAYER_KEY=0x...          # a wallet holding >= 1 USDC on Base
- *   node scripts/seed-okx-receipt.js                     # dry run
- *   node scripts/seed-okx-receipt.js --confirm           # actually pay
+ *   export SEED_PAYER_KEY=0x...          # a wallet holding USDC on Base
+ *   node scripts/seed-okx-receipt.js                          # dry run, premium
+ *   node scripts/seed-okx-receipt.js --tier advanced          # dry run, $0.25
+ *   node scripts/seed-okx-receipt.js --tier advanced --confirm
+ *   node scripts/seed-okx-receipt.js --confirm --no-wait      # pay, poll later
  *
  * Note: `export` puts the key in your shell history. Prefer a leading space
  * (` export SEED_PAYER_KEY=...`) or read it from your password manager.
+ *
+ * Flags:
+ *   --tier basic|advanced|premium   which paid route to buy (default premium)
+ *   --duration-days N               commitment window (default 1)
+ *   --no-wait                       pay and exit; poll the status route later
+ *   --wait-minutes N                how long to poll for a score (default 90)
+ *
+ * Timing: the commitment window starts at purchase, so only activity *after*
+ * this runs counts. Evidence is collected by the monitoring loop in the x402
+ * process, so a receipt appears on the first tick after the window closes —
+ * within MONITORING_INTERVAL_MINUTES of it, not instantly.
  */
 
 require('dotenv').config();
@@ -34,18 +47,37 @@ const { privateKeyToAccount } = require('viem/accounts');
 const { wrapFetchWithPayment, x402Client } = require('@x402/fetch');
 const { ExactEvmScheme } = require('@x402/evm');
 
+const pricingConfig = require('../config/x402-pricing.json');
+
 const DEFAULT_URL = 'https://kinetix-x402-production.up.railway.app';
 const NETWORK = 'eip155:8453';
 const USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
-const PRICE_BASE_UNITS = 1000000n; // $1.00, USDC has 6 decimals
 
 const args = process.argv.slice(2);
 const confirmed = args.includes('--confirm');
+const noWait = args.includes('--no-wait');
 const baseUrl = (readFlag('--url') || DEFAULT_URL).replace(/\/$/, '');
-// Short by default so the receipt materializes in minutes rather than days.
-// Scoring runs when the window closes; nothing collects evidence on this
-// service, so the receipt will legitimately score 0 / failed.
-const durationDays = Number(readFlag('--duration-days') || 0.002);
+
+const tier = readFlag('--tier') || 'premium';
+if (!pricingConfig.tiers[tier]) {
+  fail(`Unknown tier "${tier}". Expected one of: ${Object.keys(pricingConfig.tiers).join(', ')}`);
+}
+// Read from the pricing config rather than a literal, so a tier price change
+// cannot make the amount assertion below silently wrong. Prices are strings in
+// the config ("1.00"), so coerce before doing arithmetic on them.
+const priceUsdc = Number(pricingConfig.tiers[tier].price_usdc);
+if (!Number.isFinite(priceUsdc) || priceUsdc <= 0) {
+  fail(`Tier "${tier}" has an unusable price: ${pricingConfig.tiers[tier].price_usdc}`);
+}
+const PRICE_BASE_UNITS = BigInt(Math.round(priceUsdc * 1e6));
+const priceLabel = priceUsdc.toFixed(2);
+
+// One day, because the window now has to contain real activity. The old
+// default was 0.002 days (~3 minutes), chosen when nothing collected evidence
+// and every receipt scored 0 by design. With collection working, a 3-minute
+// window catches nothing and buys a `failed` receipt for real money.
+const durationDays = Number(readFlag('--duration-days') || 1);
+const waitMinutes = Number(readFlag('--wait-minutes') || 90);
 
 function readFlag(name) {
   const i = args.indexOf(name);
@@ -57,6 +89,45 @@ function fail(message) {
   process.exit(1);
 }
 
+/**
+ * Wait for the window to close, then poll until a receipt exists.
+ *
+ * A single check right after expiry is not enough any more. Scoring is
+ * deferred until evidence collection has succeeded since the window closed,
+ * and that happens on the monitoring loop's own schedule
+ * (MONITORING_INTERVAL_MINUTES), so the status route legitimately reports
+ * `active` for a while after `monitoring_until` passes.
+ *
+ * @returns {Promise<string|null>} the receipt id, or null if it never scored
+ */
+async function pollForReceipt(statusUrl, closesAtMs) {
+  const untilClose = Math.max(0, closesAtMs - Date.now());
+  if (untilClose > 0) {
+    console.log(`\nWindow closes in ${Math.ceil(untilClose / 60000)} min. Waiting...`);
+    await new Promise(resolve => setTimeout(resolve, untilClose + 5000));
+  }
+
+  const deadline = Date.now() + waitMinutes * 60 * 1000;
+  const intervalMs = 60 * 1000;
+  console.log(`Window closed. Polling for up to ${waitMinutes} min while the loop collects.`);
+
+  while (Date.now() < deadline) {
+    const res = await fetch(statusUrl);
+    const status = await res.json();
+
+    if (status.receipt_id) {
+      console.log(`✓ Scored: status=${status.status}`);
+      return status.receipt_id;
+    }
+
+    const mins = Math.ceil((deadline - Date.now()) / 60000);
+    console.log(`  status=${status.status} evidence=${status.evidence_count} (${mins} min left)`);
+    await new Promise(resolve => setTimeout(resolve, intervalMs));
+  }
+
+  return null;
+}
+
 async function main() {
   const key = process.env.SEED_PAYER_KEY;
   if (!key) fail('SEED_PAYER_KEY is not set. See the usage note at the top of this file.');
@@ -64,7 +135,16 @@ async function main() {
 
   const account = privateKeyToAccount(key);
   console.log(`\nSeeding a receipt on ${baseUrl}`);
+  console.log(`Tier:  ${tier} ($${priceLabel} USDC)`);
   console.log(`Payer: ${account.address}`);
+
+  if (tier === 'basic') {
+    // The basic route ignores caller criteria and pins its own window.
+    console.log(
+      `Note:  basic pins duration_days to ${pricingConfig.tiers.basic.max_duration_days}; ` +
+      `--duration-days is ignored on this tier.`
+    );
+  }
 
   if (account.address.toLowerCase() === '0x8c61756f693a321777562433e19b2aabf71f5519') {
     fail('That is the Kinetix payTo wallet. Pay from a different wallet.');
@@ -82,7 +162,7 @@ async function main() {
   console.log(`USDC balance: ${formatUnits(balance, 6)}`);
   // Only fatal when actually paying, so a dry run still shows the challenge.
   if (balance < PRICE_BASE_UNITS && confirmed) {
-    fail(`Need at least 1.00 USDC on Base mainnet, have ${formatUnits(balance, 6)}.`);
+    fail(`Need at least ${priceLabel} USDC on Base mainnet, have ${formatUnits(balance, 6)}.`);
   }
 
   const payload = {
@@ -98,11 +178,11 @@ async function main() {
     // minimum_actions is derived from duration x frequency when omitted.
     criteria: { duration_days: durationDays, frequency: 'daily' }
     // erc8004_token_id deliberately omitted: without it no on-chain
-    // giveFeedback is attempted, so this run costs the $1 USDC and no gas.
+    // giveFeedback is attempted, so this run costs the USDC and no gas.
   };
 
   // Show the real challenge before spending anything.
-  const challengeRes = await fetch(`${baseUrl}/api/x402/verify/premium`, {
+  const challengeRes = await fetch(`${baseUrl}/api/x402/verify/${tier}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -136,7 +216,7 @@ async function main() {
   const client = new x402Client().register(NETWORK, new ExactEvmScheme(account));
   const fetchWithPay = wrapFetchWithPayment(fetch, client);
 
-  const paid = await fetchWithPay(`${baseUrl}/api/x402/verify/premium`, {
+  const paid = await fetchWithPay(`${baseUrl}/api/x402/verify/${tier}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -150,21 +230,21 @@ async function main() {
   console.log(`✓ Paid. Commitment: ${commitmentId}`);
   console.log(`  Monitoring until: ${body.monitoring_until}`);
 
-  // Scoring is triggered by the status route once the window closes.
-  const closesAt = new Date(body.monitoring_until).getTime();
-  const waitMs = Math.max(0, closesAt - Date.now()) + 5000;
-  console.log(`\nWaiting ${Math.ceil(waitMs / 1000)}s for the window to close...`);
-  await new Promise(resolve => setTimeout(resolve, waitMs));
+  const statusUrl = `${baseUrl}/api/x402/verify/${commitmentId}/status`;
 
-  const statusRes = await fetch(`${baseUrl}/api/x402/verify/${commitmentId}/status`);
-  const status = await statusRes.json();
-  const receiptId = status.receipt_id;
-  console.log(`✓ Scored: status=${status.status}`);
+  if (noWait) {
+    console.log('\nNot waiting. Once the window closes, poll:');
+    console.log(`  curl -s ${statusUrl}`);
+    console.log('Then fetch the receipt with the receipt_id it reports.\n');
+    return;
+  }
 
+  const receiptId = await pollForReceipt(statusUrl, new Date(body.monitoring_until).getTime());
   if (!receiptId) {
-    console.log('\nNo receipt_id on the status response. Full status:');
-    console.log(JSON.stringify(status, null, 2));
-    fail('Could not determine the receipt id.');
+    fail(
+      `No receipt after ${waitMinutes} min of polling. The commitment is still ` +
+      `live — re-check ${statusUrl} later rather than paying again.`
+    );
   }
 
   const receiptRes = await fetch(`${baseUrl}/api/v1/attestation/${receiptId}`);
