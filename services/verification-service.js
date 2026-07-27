@@ -9,6 +9,37 @@ const reputationService = require('../utils/erc8004-reputation');
 const easService = require('../utils/eas-attestation');
 const { ValidationError } = require('../utils/validation-error');
 
+// Actions expected per day for each supported frequency.
+const FREQUENCY_RATE_PER_DAY = { hourly: 24, daily: 1, weekly: 1 / 7 };
+
+/**
+ * How many actions a consistency commitment is expected to produce.
+ *
+ * `minimum_actions` is the denominator of the completion rate, so it decides what
+ * a paid verification actually attests to. It is not required by any route's
+ * inputSchema, so it has to be derivable: "daily for 7 days" means 7, not 1.
+ *
+ * Always returns a positive integer, so the denominator can never be 0
+ * (-> Infinity -> a free `verified`) or undefined (-> NaN -> `failed`).
+ */
+function deriveMinimumActions(criteria = {}) {
+  const days = Number(criteria.duration_days);
+  const rate = FREQUENCY_RATE_PER_DAY[criteria.frequency] ?? FREQUENCY_RATE_PER_DAY.daily;
+  if (!Number.isFinite(days) || days <= 0) return 1;
+  return Math.max(1, Math.round(days * rate));
+}
+
+/**
+ * The value scoring must use: the caller's, when it is a usable positive
+ * integer, otherwise the derived one. Legacy commitments on disk predate the
+ * default and carry no `minimum_actions` at all.
+ */
+function resolveMinimumActions(criteria = {}) {
+  const stated = Number(criteria.minimum_actions);
+  if (Number.isInteger(stated) && stated > 0) return stated;
+  return deriveMinimumActions(criteria);
+}
+
 class VerificationService {
   constructor() {
     this.rules = verificationRules;
@@ -41,6 +72,13 @@ class VerificationService {
   async createVerification(commitment) {
     this._validateCommitment(commitment);
 
+    // Pin the denominator at creation so the receipt states the target the buyer
+    // was sold, rather than one re-derived at scoring time from mutated criteria.
+    const criteria = { ...commitment.criteria };
+    if (commitment.verification_type === 'consistency' && criteria.minimum_actions === undefined) {
+      criteria.minimum_actions = deriveMinimumActions(criteria);
+    }
+
     const difficulty = this.calculateDifficulty(commitment);
     const commitmentId = dataStore.generateId('cmt_kx_');
     const now = new Date().toISOString();
@@ -64,10 +102,14 @@ class VerificationService {
       commitment_id: commitmentId,
       agent_id: commitment.agent_id,
       pubkey: commitment.pubkey || '',
+      // Optional and distinct from pubkey: the EVM address that receives the EAS
+      // attestation. A Nostr agent has no such address, and omitting it makes
+      // EAS skip cleanly rather than fail on an unparseable recipient.
+      wallet_address: commitment.wallet_address || '',
       platform_profiles: commitment.platform_profiles || {},
       description: commitment.description,
       verification_type: commitment.verification_type,
-      criteria: commitment.criteria,
+      criteria,
       difficulty,
       status: 'active',
       evidence: [],
@@ -128,6 +170,14 @@ class VerificationService {
       throw new Error(`Commitment not found: ${verificationId}`);
     }
 
+    // A scored commitment is closed. Its scoring_result and receipt are already
+    // signed over the evidence array as it stood, so appending afterwards makes
+    // the file disagree with the artifact a buyer can fetch.
+    if (commitment.status !== 'active') {
+      this._log(`Ignoring evidence for ${verificationId}: status is ${commitment.status}`);
+      return commitment;
+    }
+
     // Validate evidence
     const platform = evidence.platform;
     const validation = this._validateEvidence(evidence, platform);
@@ -147,12 +197,12 @@ class VerificationService {
 
     this._log(`Added evidence ${evidence.evidence_id} to ${verificationId}`);
 
-    // Check if commitment period ended -> trigger scoring
-    if (new Date() >= new Date(commitment.end_date) && commitment.status === 'active') {
-      this._log(`Commitment ${verificationId} period ended, triggering scoring`);
-      await this.scoreVerification(verificationId);
-    }
-
+    // Deliberately does NOT trigger scoring on expiry. Collectors add evidence
+    // one item at a time (monitoring-service.js), so scoring here would fire on
+    // the first item of a batch and sign a receipt over a partial evidence set
+    // while the remaining items were still being appended. Expiry is handled by
+    // monitoring-service.checkCommitment (after its whole batch lands) and by
+    // getStatus, both of which see the complete array.
     return commitment;
   }
 
@@ -434,7 +484,9 @@ class VerificationService {
    * Direct port from VERIFICATION_CRITERIA.MD
    */
   _scoreConsistency(commitment, evidence) {
-    const required = commitment.criteria.minimum_actions;
+    // Never read minimum_actions raw: it is absent on every commitment created
+    // before it was defaulted, and 0 would make completion_rate Infinity.
+    const required = resolveMinimumActions(commitment.criteria);
     const completedEvidence = evidence.filter(e => this._meetsRequirements(e, commitment.criteria));
     const completed = completedEvidence.length;
 
@@ -710,17 +762,25 @@ class VerificationService {
     const expectedInterval = this._getExpectedInterval(commitment.criteria.frequency);
     const gracePeriod = commitment.criteria.grace_period_hours || this.rules.grace_periods.consistency_daily_hours;
 
+    // Evidence is appended across collection runs, and each run re-queries the
+    // whole window, so the persisted array is not globally ordered. Out of order
+    // it yields a negative interval, which passes the check below and scores a
+    // missed deadline as on-time.
+    const ordered = [...evidence].sort(
+      (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+    );
+
     let onTimeCount = 0;
 
-    for (let i = 1; i < evidence.length; i++) {
-      const timeSinceLast = (new Date(evidence[i].timestamp) - new Date(evidence[i - 1].timestamp)) / 3600000;
+    for (let i = 1; i < ordered.length; i++) {
+      const timeSinceLast = (new Date(ordered[i].timestamp) - new Date(ordered[i - 1].timestamp)) / 3600000;
 
       if (timeSinceLast <= expectedInterval + gracePeriod) {
         onTimeCount++;
       }
     }
 
-    const totalIntervals = evidence.length - 1;
+    const totalIntervals = ordered.length - 1;
     return (onTimeCount / totalIntervals) * 100;
   }
 
@@ -803,6 +863,15 @@ class VerificationService {
         throw new ValidationError('criteria.duration_days must be a positive number');
       }
     }
+    // minimum_actions is the completion-rate denominator, and the paid routes
+    // spread caller criteria straight through. A 0 makes the rate Infinity,
+    // which clamps to 100 and buys a `verified` receipt for one action.
+    if (commitment.criteria.minimum_actions !== undefined) {
+      const actions = Number(commitment.criteria.minimum_actions);
+      if (!Number.isInteger(actions) || actions <= 0) {
+        throw new ValidationError('criteria.minimum_actions must be a positive integer');
+      }
+    }
   }
 
   _validateEvidence(evidence, platform) {
@@ -824,3 +893,5 @@ class VerificationService {
 
 module.exports = new VerificationService();
 module.exports.VerificationService = VerificationService;
+module.exports.deriveMinimumActions = deriveMinimumActions;
+module.exports.resolveMinimumActions = resolveMinimumActions;
