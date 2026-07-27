@@ -8,6 +8,7 @@ const {
   declareDiscoveryExtension
 } = require('@x402/extensions/bazaar');
 const verificationService = require('../../services/verification-service');
+const { deriveMinimumActions } = verificationService;
 const attestationService = require('../../services/attestation-service');
 const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
@@ -138,6 +139,10 @@ const basicDiscovery = declareDiscoveryExtension({
         type: 'string',
         description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
       },
+      wallet_address: {
+        type: 'string',
+        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
+      },
       commitment_description: { type: 'string', description: 'What is being verified' }
     },
     required: ['agent_id', 'platform', 'platform_handle']
@@ -180,6 +185,10 @@ const advancedDiscovery = declareDiscoveryExtension({
       platform_handle: {
         type: 'string',
         description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
+      },
+      wallet_address: {
+        type: 'string',
+        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
       },
       criteria: {
         type: 'object',
@@ -227,6 +236,10 @@ const premiumDiscovery = declareDiscoveryExtension({
       platform_handle: {
         type: 'string',
         description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
+      },
+      wallet_address: {
+        type: 'string',
+        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
       },
       verification_type: {
         type: 'string',
@@ -422,10 +435,23 @@ function sendVerificationError(res, tier, error) {
   res.status(500).json({ error: 'Verification creation failed' });
 }
 
+/**
+ * Merge caller criteria with the values this service controls.
+ *
+ * `overrides` is applied after the spread so a caller can never overwrite a tier
+ * clamp. An absent `minimum_actions` is left absent on purpose: it is derived in
+ * verificationService.createVerification, which sees these already-clamped
+ * values and knows the verification_type it applies to. A caller-supplied value
+ * is kept, and rejected there if it is not a positive integer.
+ */
+function buildCriteria(callerCriteria, overrides) {
+  return { ...callerCriteria, ...overrides };
+}
+
 // Basic verification endpoint
 app.post('/api/x402/verify/basic', async (req, res) => {
   try {
-    const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id } = req.body;
+    const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id, wallet_address } = req.body;
 
     if (!agent_id || !platform || !platform_handle) {
       return res.status(400).json({
@@ -445,13 +471,19 @@ app.post('/api/x402/verify/basic', async (req, res) => {
       agent_id,
       platform_profiles: target.platform_profiles,
       pubkey: target.pubkey,
+      wallet_address,
       description: commitment_description || `Basic verification for ${agent_id}`,
       verification_type: 'consistency',
       criteria: {
         platform: target.platform,
         frequency: 'daily',
         duration_days: pricingConfig.tiers.basic.max_duration_days,
-        minimum_actions: 1
+        // Derived, not 1: a hardcoded 1 over a 7-day daily window meant a single
+        // post scored 100% completion and sold a `verified` receipt.
+        minimum_actions: deriveMinimumActions({
+          frequency: 'daily',
+          duration_days: pricingConfig.tiers.basic.max_duration_days
+        })
       },
       payment: paymentMetadata,
       erc8004_token_id: erc8004_token_id || null
@@ -487,7 +519,7 @@ app.post('/api/x402/verify/basic', async (req, res) => {
 // Advanced verification endpoint
 app.post('/api/x402/verify/advanced', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id } = req.body;
+    const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id, wallet_address } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
       return res.status(400).json({
@@ -513,16 +545,16 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
       agent_id,
       platform_profiles: target.platform_profiles,
       pubkey: target.pubkey,
+      wallet_address,
       description: commitment_description,
       verification_type: criteria.verification_type || 'consistency',
-      criteria: {
+      criteria: buildCriteria(criteria, {
         frequency: criteria.frequency || 'daily',
-        ...criteria,
         platform: target.platform,
         // Clamp last: spreading `criteria` after this would let a caller's raw
         // duration_days overwrite the cap and buy a 90-day window at tier price.
         duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days)
-      },
+      }),
       payment: paymentMetadata,
       erc8004_token_id: erc8004_token_id || null
     };
@@ -559,7 +591,7 @@ app.post('/api/x402/verify/premium', async (req, res) => {
   try {
     const {
       agent_id, commitment_description, criteria, verification_type,
-      platform, platform_handle, erc8004_token_id
+      platform, platform_handle, erc8004_token_id, wallet_address
     } = req.body;
 
     if (!agent_id || !commitment_description || !criteria) {
@@ -586,15 +618,15 @@ app.post('/api/x402/verify/premium', async (req, res) => {
       agent_id,
       platform_profiles: target.platform_profiles,
       pubkey: target.pubkey,
+      wallet_address,
       description: commitment_description,
       verification_type: verification_type || 'consistency',
-      criteria: {
-        ...criteria,
+      criteria: buildCriteria(criteria, {
         platform: target.platform,
         // Clamp last: spreading `criteria` after this would let a caller's raw
         // duration_days overwrite the cap and buy a 10-year window at tier price.
         duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days)
-      },
+      }),
       payment: paymentMetadata,
       erc8004_token_id: erc8004_token_id || null
     };

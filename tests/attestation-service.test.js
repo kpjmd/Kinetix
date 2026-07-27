@@ -73,6 +73,47 @@ describe('AttestationService', () => {
     });
   });
 
+  describe('recipient.wallet_address', () => {
+    const commitmentWith = extra => ({
+      commitment_id: 'cmt_kx_wallet',
+      agent_id: 'test_agent',
+      platform_profiles: {},
+      description: 'Test',
+      verification_type: 'consistency',
+      criteria: {},
+      difficulty: 'trivial',
+      created_at: '2025-02-01T00:00:00Z',
+      start_date: '2025-02-01T00:00:00Z',
+      end_date: '2025-02-02T00:00:00Z',
+      evidence: [],
+      scoring_result: { status: 'failed', overall_score: 0, evidence_count: 0 },
+      ...extra
+    });
+
+    it('does not treat a Nostr pubkey as a wallet address', async () => {
+      // This field used to alias commitment.pubkey. For Clawstr that is a Nostr
+      // key: truthy, so it passed the NO_WALLET check, and EAS then rejected it
+      // and recorded the non-terminal status 'failed', which reconciliation
+      // retried every 3h to the cap.
+      const receipt = await service.generateReceipt(
+        commitmentWith({ pubkey: '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55' })
+      );
+
+      expect(receipt.recipient.wallet_address).toBe('');
+      // The Nostr identity still belongs on the receipt, just not as a wallet.
+      expect(receipt.recipient.pubkey).toMatch(/^304c37f5/);
+    });
+
+    it('keeps an explicitly supplied EVM address', async () => {
+      const wallet = '0x821a61d2C3E02446eD03285df1618639eF25D2b9';
+      const receipt = await service.generateReceipt(
+        commitmentWith({ pubkey: 'npub1whatever', wallet_address: wallet })
+      );
+
+      expect(receipt.recipient.wallet_address).toBe(wallet);
+    });
+  });
+
   describe('verifyReceipt', () => {
     it('should verify a valid receipt signature', async () => {
       const commitment = {

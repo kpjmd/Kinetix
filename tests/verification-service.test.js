@@ -1,7 +1,14 @@
 // tests/verification-service.test.js
 // Tests for verification scoring algorithms
 
-const { VerificationService } = require('../services/verification-service');
+jest.mock('../services/data-store');
+
+const dataStore = require('../services/data-store');
+const {
+  VerificationService,
+  deriveMinimumActions,
+  resolveMinimumActions
+} = require('../services/verification-service');
 
 describe('VerificationService', () => {
   let service;
@@ -181,6 +188,141 @@ describe('VerificationService', () => {
         }
       });
       expect(['challenging', 'expert']).toContain(result);
+    });
+  });
+
+  // minimum_actions is the completion-rate denominator and is not required by
+  // any route's inputSchema, so scoring must never read it raw.
+  describe('minimum_actions', () => {
+    const evidenceFor = count =>
+      Array.from({ length: count }, (_, i) => ({
+        timestamp: new Date(Date.now() - (count - 1 - i) * 24 * 60 * 60 * 1000).toISOString(),
+        content_length: 150
+      }));
+
+    it('derives a target from duration and frequency, not a bare 1', () => {
+      expect(deriveMinimumActions({ duration_days: 7, frequency: 'daily' })).toBe(7);
+      expect(deriveMinimumActions({ duration_days: 2, frequency: 'hourly' })).toBe(48);
+      expect(deriveMinimumActions({ duration_days: 7, frequency: 'weekly' })).toBe(1);
+    });
+
+    it('never derives a zero or negative denominator', () => {
+      expect(deriveMinimumActions({ duration_days: 0.1, frequency: 'weekly' })).toBe(1);
+      expect(deriveMinimumActions({})).toBe(1);
+      expect(resolveMinimumActions({ minimum_actions: 0, duration_days: 7, frequency: 'daily' })).toBe(7);
+      expect(resolveMinimumActions({ minimum_actions: -5, duration_days: 7, frequency: 'daily' })).toBe(7);
+    });
+
+    it('scores a legacy commitment with no minimum_actions instead of NaN', () => {
+      // Commitments created before the default exists carry no minimum_actions.
+      // Reading it raw gave completed/undefined -> NaN -> _getStatus(NaN) ->
+      // 'failed', serialized as null: a paid verification that collected real
+      // evidence and reported nothing.
+      const commitment = { criteria: { frequency: 'daily', duration_days: 7 } };
+
+      const result = service._scoreConsistency(commitment, evidenceFor(7));
+
+      expect(Number.isNaN(result.overall_score)).toBe(false);
+      expect(result.completion_rate).toBe(100);
+      expect(result.status).toBe('verified');
+    });
+
+    it('does not let minimum_actions: 0 buy a verified receipt', () => {
+      // completed/0 is Infinity, which Math.min clamps to 100.
+      const commitment = { criteria: { frequency: 'daily', duration_days: 7, minimum_actions: 0 } };
+
+      const result = service._scoreConsistency(commitment, evidenceFor(1));
+
+      expect(result.completion_rate).toBeLessThan(100);
+      expect(result.status).not.toBe('verified');
+    });
+
+    it('reports a numeric days_missed when the commitment collected nothing', () => {
+      const result = service._scoreConsistency(
+        { criteria: { frequency: 'daily', duration_days: 7 } },
+        []
+      );
+      expect(result.days_missed).toBe(7);
+    });
+
+    it('rejects a non-positive minimum_actions at creation', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'consistency',
+        criteria: { duration_days: 7, minimum_actions: 0 }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/minimum_actions/);
+    });
+  });
+
+  describe('_calculateTimeliness', () => {
+    it('is unaffected by the order evidence was appended in', () => {
+      // Each collection run re-queries the whole window and appends, so the
+      // persisted array is not globally ordered. Out of order, a late post
+      // yields a negative interval, which used to count as on-time.
+      const commitment = { criteria: { frequency: 'daily', grace_period_hours: 0 } };
+      const day = 24 * 60 * 60 * 1000;
+      const base = Date.parse('2026-01-01T00:00:00Z');
+      // The 4th item is 5 days after the 3rd: one genuinely missed deadline.
+      const ordered = [0, 1, 2, 7].map(d => ({ timestamp: new Date(base + d * day).toISOString() }));
+
+      const inOrder = service._calculateTimeliness(commitment, ordered);
+      const shuffled = service._calculateTimeliness(commitment, [ordered[3], ordered[0], ordered[2], ordered[1]]);
+
+      expect(inOrder).toBeCloseTo((2 / 3) * 100);
+      expect(shuffled).toBe(inOrder);
+    });
+
+    it('does not mutate the caller evidence array', () => {
+      const evidence = [
+        { timestamp: '2026-01-03T00:00:00Z' },
+        { timestamp: '2026-01-01T00:00:00Z' }
+      ];
+      service._calculateTimeliness({ criteria: { frequency: 'daily' } }, evidence);
+      expect(evidence[0].timestamp).toBe('2026-01-03T00:00:00Z');
+    });
+  });
+
+  describe('addEvidence', () => {
+    const activeCommitment = () => ({
+      commitment_id: 'cmt_kx_test',
+      status: 'active',
+      // Already expired: the window has closed but scoring has not run yet,
+      // which is exactly the state the final collection tick sees.
+      end_date: new Date(Date.now() - 1000).toISOString(),
+      evidence: []
+    });
+
+    const item = id => ({ platform: 'clawstr', event_id: id, timestamp: new Date().toISOString(), signature: 'sig' });
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      dataStore.saveCommitment.mockResolvedValue(undefined);
+    });
+
+    it('does not score an expired commitment while a batch is still landing', async () => {
+      // Collectors add one item at a time. Scoring here fired on the first item
+      // and signed a receipt over a 1-item evidence array while items 2..N were
+      // still being appended, so the receipt disagreed with the stored file.
+      const commitment = activeCommitment();
+      dataStore.loadCommitment.mockResolvedValue(commitment);
+      const scoreSpy = jest.spyOn(service, 'scoreVerification').mockResolvedValue(undefined);
+
+      for (const id of ['e1', 'e2', 'e3', 'e4', 'e5']) {
+        await service.addEvidence('cmt_kx_test', item(id));
+      }
+
+      expect(scoreSpy).not.toHaveBeenCalled();
+      expect(commitment.evidence).toHaveLength(5);
+    });
+
+    it('refuses to append to a commitment that has already been scored', async () => {
+      const commitment = { ...activeCommitment(), status: 'verified' };
+      dataStore.loadCommitment.mockResolvedValue(commitment);
+
+      await service.addEvidence('cmt_kx_test', item('e1'));
+
+      expect(commitment.evidence).toHaveLength(0);
+      expect(dataStore.saveCommitment).not.toHaveBeenCalled();
     });
   });
 });

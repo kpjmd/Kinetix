@@ -42,6 +42,13 @@ const validPayload = {
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 
+// Read a stored commitment the way monitoring-service would.
+function readCommitment(commitmentId) {
+  return JSON.parse(
+    fs.readFileSync(path.join(TEST_DATA_DIR, 'commitments', `${commitmentId}.json`), 'utf8')
+  );
+}
+
 describe('x402 verification server', () => {
   beforeAll(async () => {
     await server.initializeServices();
@@ -154,6 +161,29 @@ describe('x402 verification server', () => {
       expect(stored.pubkey).toBe('npub1testhandle');
     });
 
+    it('pins a minimum_actions target when the caller omits one', async () => {
+      // Not in any inputSchema, so advanced/premium callers cannot supply it.
+      // Left undefined it made completion_rate NaN, which _getStatus reports as
+      // 'failed' — a paid verification that collected evidence and scored zero.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: { duration_days: 7, frequency: 'daily' } });
+
+      expect(res.status).toBe(200);
+      const stored = readCommitment(res.body.commitment_id);
+      expect(stored.criteria.minimum_actions).toBe(7);
+    });
+
+    it('rejects a minimum_actions of 0 rather than selling a guaranteed pass', async () => {
+      // completed/0 is Infinity, clamped to a completion_rate of 100.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: { ...validPayload.criteria, minimum_actions: 0 } });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/minimum_actions/);
+    });
+
     it('clamps duration_days to the tier cap', async () => {
       // The clamp used to be overwritten by a later spread of the caller's
       // criteria, so a tier cap could be bought past at tier price.
@@ -179,6 +209,22 @@ describe('x402 verification server', () => {
       if (res.status === 500) {
         expect(res.body.details).toBeUndefined();
       }
+    });
+  });
+
+  describe('POST /api/x402/verify/basic', () => {
+    it('requires an action per day, not a single action for the whole window', async () => {
+      // The route hardcoded minimum_actions: 1 against a 7-day daily window, so
+      // one post scored 100% completion and sold a `verified` receipt.
+      const res = await request(server).post('/api/x402/verify/basic').send({
+        agent_id: 'agent_basic_001',
+        platform: 'clawstr',
+        platform_handle: 'npub1testhandle'
+      });
+
+      expect(res.status).toBe(200);
+      const stored = readCommitment(res.body.commitment_id);
+      expect(stored.criteria.minimum_actions).toBe(stored.criteria.duration_days);
     });
   });
 

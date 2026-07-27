@@ -7,6 +7,8 @@ const crypto = require('crypto');
 const { createSigner } = require('../utils/signing-key');
 const { canonicalString } = require('../utils/receipt-canonical');
 
+const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
+
 class AttestationService {
   constructor() {
     this.signingWallet = null;
@@ -82,7 +84,15 @@ class AttestationService {
         agent_id: commitment.agent_id,
         pubkey: commitment.pubkey || '',
         platform_profiles: commitment.platform_profiles || {},
-        wallet_address: commitment.pubkey || '',
+        // Sourced from an explicit wallet_address, never from pubkey. A Clawstr
+        // commitment's pubkey is a Nostr key: truthy, so it passed the
+        // NO_WALLET check, then EAS rejected it as an address and recorded the
+        // non-terminal status 'failed', which reconciliation retried every 3h to
+        // the cap. Anything that is not an EVM address becomes '' here, which
+        // EAS records as the terminal 'skipped_no_wallet'.
+        wallet_address: EVM_ADDRESS.test(commitment.wallet_address || '')
+          ? commitment.wallet_address
+          : '',
         erc8004_token_id: commitment.erc8004_token_id || null
       },
 
