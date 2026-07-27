@@ -237,6 +237,17 @@ describe('VerificationService', () => {
       expect(result.status).not.toBe('verified');
     });
 
+    it('never reports a negative days_missed when the target is exceeded', () => {
+      // Collection returns the whole window, so overshooting the target is
+      // normal — and required - completed went negative in a signed receipt.
+      const result = service._scoreConsistency(
+        { criteria: { frequency: 'daily', duration_days: 3, minimum_actions: 3 } },
+        evidenceFor(12)
+      );
+      expect(result.days_missed).toBe(0);
+      expect(result.completion_rate).toBe(100);
+    });
+
     it('reports a numeric days_missed when the commitment collected nothing', () => {
       const result = service._scoreConsistency(
         { criteria: { frequency: 'daily', duration_days: 7 } },
@@ -279,6 +290,47 @@ describe('VerificationService', () => {
       ];
       service._calculateTimeliness({ criteria: { frequency: 'daily' } }, evidence);
       expect(evidence[0].timestamp).toBe('2026-01-03T00:00:00Z');
+    });
+  });
+
+  // A relay outage produces the same empty evidence array as an inactive agent.
+  // Scoring must be able to tell them apart, or a paid receipt says a customer
+  // did nothing when in fact we could not look.
+  describe('_collectionReadiness', () => {
+    const hoursAgo = h => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+
+    it('scores immediately when nothing tracks collection for this commitment', () => {
+      // The free API route and unsupported platforms never write a monitoring
+      // block; waiting on one would strand them forever.
+      expect(service._collectionReadiness({ end_date: hoursAgo(1) }).ready).toBe(true);
+    });
+
+    it('scores as soon as a collection succeeded after the window closed', () => {
+      const readiness = service._collectionReadiness({
+        end_date: hoursAgo(2),
+        monitoring: { last_success_at: hoursAgo(1) }
+      });
+      expect(readiness).toEqual({ ready: true });
+    });
+
+    it('waits while collection keeps failing inside the grace window', () => {
+      const readiness = service._collectionReadiness({
+        end_date: hoursAgo(2),
+        monitoring: { last_success_at: hoursAgo(5), consecutive_failures: 3 }
+      });
+      expect(readiness.ready).toBe(false);
+      expect(readiness.reason).toMatch(/3 consecutive failures/);
+    });
+
+    it('scores anyway once the grace window expires, flagged as degraded', () => {
+      // The customer paid and is owed a receipt; it just has to be honest that
+      // the evidence set may be incomplete.
+      const readiness = service._collectionReadiness({
+        end_date: hoursAgo(30),
+        monitoring: { last_success_at: null, consecutive_failures: 9 }
+      });
+      expect(readiness.ready).toBe(true);
+      expect(readiness.degraded).toBe(true);
     });
   });
 

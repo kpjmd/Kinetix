@@ -90,9 +90,13 @@ async function main() {
     commitment_description:
       'Reference verification issued to seed the Kinetix OKX AI listing. Demonstrates the full receipt format.',
     verification_type: 'consistency',
-    platform: readFlag('--platform') || 'moltbook',
-    platform_handle: readFlag('--handle') || 'Kinetix',
-    criteria: { duration_days: durationDays, frequency: 'daily', minimum_actions: 1 }
+    // clawstr + Kinetix's own npub: the only platform whose collector can
+    // attribute evidence to one agent, and an identity with real posting
+    // history, so the seeded receipt scores on merit rather than on zero.
+    platform: readFlag('--platform') || 'clawstr',
+    platform_handle: readFlag('--handle') || 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5',
+    // minimum_actions is derived from duration x frequency when omitted.
+    criteria: { duration_days: durationDays, frequency: 'daily' }
     // erc8004_token_id deliberately omitted: without it no on-chain
     // giveFeedback is attempted, so this run costs the $1 USDC and no gas.
   };

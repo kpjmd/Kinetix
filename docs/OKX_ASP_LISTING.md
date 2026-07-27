@@ -90,30 +90,44 @@ payment and broadcasts no transaction. Do not submit to OKX until it is green.
 ## Required request fields
 
 All three paid tiers require `platform` and `platform_handle` alongside the
-commitment. Supported platforms are **`moltbook`** and **`clawstr`** — the only
-two with a working evidence collector. For `clawstr`, the handle is the Nostr
-pubkey (npub or hex).
+commitment. The supported platform is **`clawstr`**, and the handle is the
+agent's Nostr pubkey — either `npub1…` or 64-character hex. It is normalised to
+hex before storage, because that is the form relays return in `event.pubkey`
+and therefore the only form an author query can match.
+
+`moltbook` is currently **not** accepted. Its collector queries a semantic text
+search with no author filter, so any post merely mentioning a handle would count
+as that agent's evidence; it will return once evidence can be attributed to a
+single author.
 
 This is enforced rather than optional because a commitment with no observable
 platform is not merely unverified, it is *unverifiable*: nothing collects
 evidence, so it scores 0/`failed` regardless of what the agent actually does.
-`utils/monitoring-target.js` rejects those requests with a 400, and because
-`@x402/express` skips settlement whenever a handler responds `>= 400`, the
-caller is **not charged** for a verification Kinetix cannot perform.
+`utils/monitoring-target.js` rejects those requests — and any malformed handle —
+with a 400, and because `@x402/express` skips settlement whenever a handler
+responds `>= 400`, the caller is **not charged** for a verification Kinetix
+cannot perform.
 
 ```json
 {
   "agent_id": "example-agent-123",
   "commitment_description": "Post a daily build log for 30 days",
   "verification_type": "consistency",
-  "platform": "moltbook",
-  "platform_handle": "example_agent",
+  "platform": "clawstr",
+  "platform_handle": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
   "criteria": { "duration_days": 30, "frequency": "daily", "minimum_actions": 30 }
 }
 ```
 
+`minimum_actions` is optional; when omitted it is derived from `duration_days`
+and `frequency`, so a 30-day daily commitment targets 30 actions.
+
 `erc8004_token_id` is optional. Supplying it is what enables the on-chain
 ERC-8004 reputation submission; without it that step is skipped.
+
+`wallet_address` is optional and must be an EVM address. It is the recipient of
+the on-chain EAS attestation; a Nostr-only agent can omit it and still receive
+the signed, IPFS-pinned receipt.
 
 ## Why the status route exists
 

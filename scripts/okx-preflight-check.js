@@ -34,8 +34,9 @@ const VALID_PAYLOAD = {
   agent_id: 'agent_preflight_check',
   commitment_description: 'Preflight probe — not a real commitment',
   verification_type: 'consistency',
-  platform: 'moltbook',
-  platform_handle: 'preflight_probe',
+  platform: 'clawstr',
+  // A real npub: the service bech32-decodes the handle and 400s a placeholder.
+  platform_handle: 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5',
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 

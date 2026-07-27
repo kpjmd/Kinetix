@@ -9,11 +9,14 @@ const {
 } = require('@x402/extensions/bazaar');
 const verificationService = require('../../services/verification-service');
 const { deriveMinimumActions } = verificationService;
+const monitoringService = require('../../services/monitoring-service');
 const attestationService = require('../../services/attestation-service');
+const verificationRules = require('../../config/verification-rules.json');
 const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
 const { createRateLimiter } = require('../../utils/rate-limiter');
 const { resolveMonitoringTarget, SUPPORTED_PLATFORMS } = require('../../utils/monitoring-target');
+const clawstrApi = require('../../utils/clawstr-api');
 
 const app = express();
 const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
@@ -382,8 +385,12 @@ async function initializeServices() {
   console.log(`✓ Data store at ${persistence.dataDir} (boot #${persistence.bootCount})`);
 
   await attestationService.initialize();
-  verificationService.initialize(null, attestationService);
+  verificationService.initialize(monitoringService, attestationService);
+  monitoringService.initialize(verificationService);
   console.log('✓ Verification services initialized');
+  // Note: the monitoring timer is started in start(), not here. Tests call
+  // initializeServices() directly, and timers here would spawn live relay
+  // queries and keep Jest alive.
 
   // In test mode, skip facilitator initialization
   if (TEST_MODE) {
@@ -693,6 +700,27 @@ function start() {
         console.log(`  POST /api/x402/verify/premium         - $${pricingConfig.tiers.premium.price_usdc} USDC`);
         console.log(`\nReady for autonomous agent payments!\n`);
       });
+
+      // Evidence collection has to run in *this* process. Each Railway service
+      // has its own volume, so the Telegram bot's loop cannot see commitments
+      // sold here — without this, every paid verification expires with zero
+      // evidence and scores 0/failed no matter what the agent did.
+      const intervalMinutes = Number(process.env.MONITORING_INTERVAL_MINUTES)
+        || verificationRules.monitoring.check_interval_minutes;
+      // immediate: a customer who buys a short window should not wait a full
+      // interval before anything is collected.
+      monitoringService.start(intervalMinutes, { immediate: true });
+      console.log(`✓ Evidence collection every ${intervalMinutes} min (nak: ${clawstrApi.resolveNakPath()})`);
+
+      // Railway sends SIGTERM on redeploy. Stop the timer so a tick cannot be
+      // torn down midway through writing a commitment.
+      const shutdown = signal => {
+        console.log(`\n${signal} received, stopping evidence collection`);
+        monitoringService.stop();
+        server.close(() => process.exit(0));
+      };
+      process.once('SIGTERM', () => shutdown('SIGTERM'));
+      process.once('SIGINT', () => shutdown('SIGINT'));
 
       // keepAliveTimeout must exceed the upstream proxy's idle timeout,
       // otherwise Railway reuses a connection Node has already closed and the

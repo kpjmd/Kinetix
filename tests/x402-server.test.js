@@ -33,12 +33,19 @@ jest.mock('@coinbase/x402', () => ({
 const request = require('supertest');
 const server = require('../api/x402/server');
 
+// Kinetix's own live Clawstr identity, and the hex it decodes to. The gate
+// bech32-decodes the handle now, so a placeholder like 'npub1testhandle' is a
+// checksum failure and a 400.
+const KINETIX_NPUB = 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
+const KINETIX_HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+
 const validPayload = {
   agent_id: 'agent_test_001',
   commitment_description: 'Post a daily build log for 7 days',
   verification_type: 'consistency',
-  platform: 'moltbook',
-  platform_handle: 'some_agent',
+  platform: 'clawstr',
+  // Kinetix's own Clawstr identity: a real npub, because the gate now decodes it.
+  platform_handle: KINETIX_NPUB,
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 
@@ -147,7 +154,7 @@ describe('x402 verification server', () => {
     it('persists the monitoring target so evidence collection can find the agent', async () => {
       const res = await request(server)
         .post('/api/x402/verify/premium')
-        .send({ ...validPayload, platform: 'clawstr', platform_handle: 'npub1testhandle' });
+        .send({ ...validPayload, platform: 'clawstr', platform_handle: KINETIX_NPUB });
       expect(res.status).toBe(200);
 
       // Read the stored commitment the way monitoring-service would.
@@ -155,10 +162,41 @@ describe('x402 verification server', () => {
         fs.readFileSync(path.join(TEST_DATA_DIR, 'commitments', `${res.body.commitment_id}.json`), 'utf8')
       );
       expect(stored.criteria.platform).toBe('clawstr');
-      expect(stored.platform_profiles.clawstr).toBe('npub1testhandle');
-      // Clawstr evidence is fetched by pubkey; this is also what lets EAS
-      // resolve a recipient wallet instead of skipping.
-      expect(stored.pubkey).toBe('npub1testhandle');
+      // The handle as given is kept for display...
+      expect(stored.platform_profiles.clawstr).toBe(KINETIX_NPUB);
+      // ...but `pubkey` must be hex. Relays return hex in event.pubkey, so a
+      // stored npub matches no event and the commitment collects nothing while
+      // looking valid. This assertion previously expected the raw npub.
+      expect(stored.pubkey).toBe(KINETIX_HEX);
+    });
+
+    it('accepts a bare hex handle and normalises its case', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform_handle: KINETIX_HEX.toUpperCase() });
+
+      expect(res.status).toBe(200);
+      expect(readCommitment(res.body.commitment_id).pubkey).toBe(KINETIX_HEX);
+    });
+
+    it('rejects a malformed clawstr handle before charging for it', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform_handle: 'npub1nonsense' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/clawstr platform_handle/);
+    });
+
+    it('refuses moltbook while its collector cannot attribute evidence', async () => {
+      // moltbookApi.search is a text search with no author filter, so any post
+      // mentioning the handle would become that agent's evidence.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform: 'moltbook', platform_handle: 'some_agent' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/Unsupported platform/);
     });
 
     it('pins a minimum_actions target when the caller omits one', async () => {
@@ -219,7 +257,7 @@ describe('x402 verification server', () => {
       const res = await request(server).post('/api/x402/verify/basic').send({
         agent_id: 'agent_basic_001',
         platform: 'clawstr',
-        platform_handle: 'npub1testhandle'
+        platform_handle: KINETIX_NPUB
       });
 
       expect(res.status).toBe(200);
