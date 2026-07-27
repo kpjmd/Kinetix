@@ -163,3 +163,121 @@ describe('spawned nak process', () => {
     delete process.env.CLAWSTR_SECRET_KEY;
   });
 });
+
+describe('normalizeNostrPubkey', () => {
+  const NPUB = 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
+  const HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+
+  it('decodes an npub to the hex relays actually return', () => {
+    // Known vector, cross-checked against `nak decode`.
+    expect(clawstrApi.normalizeNostrPubkey(NPUB)).toBe(HEX);
+  });
+
+  it('accepts the 0x-prefixed and bare hex forms, normalising case', () => {
+    expect(clawstrApi.normalizeNostrPubkey(`0x${HEX}`)).toBe(HEX);
+    expect(clawstrApi.normalizeNostrPubkey(HEX.toUpperCase())).toBe(HEX);
+    expect(clawstrApi.normalizeNostrPubkey(`  ${NPUB}  `)).toBe(HEX);
+  });
+
+  it('throws rather than passing through something that can never match', () => {
+    // Returning the input unchanged is what made a raw npub collect zero
+    // evidence while the commitment looked perfectly valid.
+    expect(() => clawstrApi.normalizeNostrPubkey('npub1testhandle')).toThrow(/bech32|Invalid/);
+    expect(() => clawstrApi.normalizeNostrPubkey('nsec1' + 'q'.repeat(58))).toThrow();
+    expect(() => clawstrApi.normalizeNostrPubkey('abc123')).toThrow(/64-character hex/);
+    expect(() => clawstrApi.normalizeNostrPubkey('')).toThrow();
+    expect(() => clawstrApi.normalizeNostrPubkey(null)).toThrow();
+  });
+});
+
+describe('getEventsByAuthor', () => {
+  const HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+  const OK_STDERR = ['relay.ditto.pub', 'relay.primal.net', 'nos.lol']
+    .map(r => `connecting to wss://${r}... ok.`).join('\n');
+
+  const event = (id, createdAt) => JSON.stringify({ id, pubkey: HEX, created_at: createdAt, sig: 'x' });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    process.env.NAK_PATH = '/custom/nak';
+    clawstrApi._resetNakPathCache();
+  });
+
+  afterEach(() => { delete process.env.NAK_PATH; });
+
+  it('builds an author-scoped kind-1111 filter with the window bounds', async () => {
+    spawn.mockImplementation(() => fakeProc({ stdout: '', stderr: OK_STDERR }));
+
+    await clawstrApi.getEventsByAuthor(HEX, { since: 100, until: 200, limit: 7 });
+
+    const args = spawn.mock.calls[0][1];
+    expect(args.slice(0, 6)).toEqual(['req', '-k', '1111', '-a', HEX, '-s']);
+    expect(args).toContain('-u');
+    expect(args).toContain('200');
+    expect(args[args.indexOf('-l') + 1]).toBe('7');
+  });
+
+  it('omits an unset since/until rather than sending a 1969 timestamp', async () => {
+    spawn.mockImplementation(() => fakeProc({ stdout: '', stderr: OK_STDERR }));
+
+    await clawstrApi.getEventsByAuthor(HEX);
+
+    const args = spawn.mock.calls[0][1];
+    expect(args).not.toContain('-s');
+    expect(args).not.toContain('-u');
+  });
+
+  it('refuses a non-hex pubkey before spawning anything', async () => {
+    await expect(clawstrApi.getEventsByAuthor('npub1whatever')).rejects.toThrow(/64-char hex/);
+    expect(spawn).not.toHaveBeenCalled();
+  });
+
+  it('returns events oldest-first, deduped, and without slicing to the limit', async () => {
+    // nak applies -l per relay, so the union legitimately exceeds it. Slicing
+    // (as getFeed does) would discard real evidence from a paid verification.
+    spawn.mockImplementation(() => fakeProc({
+      stdout: [event('b', 200), event('a', 100), event('b', 200), event('c', 300)].join('\n'),
+      stderr: OK_STDERR
+    }));
+
+    const { events } = await clawstrApi.getEventsByAuthor(HEX, { limit: 2 });
+
+    expect(events.map(e => e.id)).toEqual(['a', 'b', 'c']);
+  });
+
+  it('reports how many relays answered, so an outage is not read as inactivity', async () => {
+    spawn.mockImplementation(() => fakeProc({
+      stdout: event('a', 100),
+      // nak exits 0 when at least one relay answers, naming the failures only
+      // on stderr. A caller that ignores it cannot tell empty from broken.
+      stderr: 'connecting to wss://nos.lol... ok.\nconnecting to wss://relay.down... no such host',
+      code: 0
+    }));
+
+    const result = await clawstrApi.getEventsByAuthor(HEX);
+
+    expect(result.relaysOk).toBe(1);
+    expect(result.relaysTotal).toBe(3);
+  });
+
+  it('skips an unparseable line instead of failing the whole collection', async () => {
+    spawn.mockImplementation(() => fakeProc({
+      stdout: [event('a', 100), 'not json', event('b', 200)].join('\n'),
+      stderr: OK_STDERR
+    }));
+
+    const { events } = await clawstrApi.getEventsByAuthor(HEX);
+
+    expect(events.map(e => e.id)).toEqual(['a', 'b']);
+  });
+
+  it('throws when every relay is unreachable, rather than returning []', async () => {
+    // getFeed's swallow-and-return-[] is right for a heartbeat and wrong here:
+    // it is indistinguishable from an agent that did nothing.
+    spawn.mockImplementation(() => fakeProc({
+      stderr: 'failed to connect to any of the given relays.', code: 3
+    }));
+
+    await expect(clawstrApi.getEventsByAuthor(HEX)).rejects.toThrow(/author query failed/i);
+  });
+});

@@ -245,6 +245,12 @@ class VerificationService {
       return commitment.scoring_result;
     }
 
+    const readiness = this._collectionReadiness(commitment);
+    if (!readiness.ready) {
+      this._log(`Deferring scoring for ${verificationId}: ${readiness.reason}`);
+      return null;
+    }
+
     let result;
     switch (commitment.verification_type) {
       case 'consistency':
@@ -258,6 +264,13 @@ class VerificationService {
         break;
       default:
         throw new Error(`Unknown verification type: ${commitment.verification_type}`);
+    }
+
+    if (readiness.degraded) {
+      // Ends up in the signed receipt. A low score reached without a confirmed
+      // successful collection has to say so, or it reads as a verdict on the
+      // agent when it may be a verdict on our relay connectivity.
+      result.collection_degraded = true;
     }
 
     commitment.scoring_result = result;
@@ -522,7 +535,10 @@ class VerificationService {
       quality_score: Math.round(qualityScore),
       overall_score: Math.round(overallScore),
       days_completed: completed,
-      days_missed: required - completed,
+      // Clamped: exceeding the target is normal now that collection returns the
+      // whole window, and a negative "missed" count in a signed receipt reads
+      // as a bug to anyone auditing it.
+      days_missed: Math.max(0, required - completed),
       evidence_count: evidence.length
     };
   }
@@ -841,6 +857,56 @@ class VerificationService {
     }
 
     return weights;
+  }
+
+  /**
+   * Whether a commitment can be scored yet, given how evidence collection went.
+   *
+   * A relay outage yields the same empty evidence array as an agent that did
+   * nothing, and scoring that difference away means signing a receipt saying a
+   * paying customer was inactive. So scoring waits for a collection that
+   * succeeded after the window closed.
+   *
+   * It cannot wait forever — the customer paid and is owed a receipt — so after
+   * a grace period it scores anyway and flags the result as degraded.
+   *
+   * This lives here, not in monitoring-service, because getStatus scores from
+   * an unauthenticated poll and would otherwise walk straight past the wait.
+   *
+   * @returns {{ready: boolean, degraded?: boolean, reason?: string}}
+   */
+  _collectionReadiness(commitment) {
+    // No monitoring block at all: either nothing collects for this commitment
+    // (the free API route, an unsupported platform) or it predates this field.
+    // Waiting would strand it, so score immediately as before.
+    if (!commitment.monitoring) return { ready: true };
+
+    const endDate = new Date(commitment.end_date);
+    const lastSuccess = commitment.monitoring.last_success_at
+      ? new Date(commitment.monitoring.last_success_at)
+      : null;
+
+    if (lastSuccess && lastSuccess >= endDate) {
+      return { ready: true };
+    }
+
+    const graceHours = this.rules.monitoring?.collection_grace_hours ?? 24;
+    const deadline = new Date(endDate.getTime() + graceHours * 60 * 60 * 1000);
+    if (new Date() >= deadline) {
+      return {
+        ready: true,
+        degraded: true,
+        reason: `no successful collection within ${graceHours}h of the window closing`
+      };
+    }
+
+    return {
+      ready: false,
+      reason:
+        `no successful collection since the window closed ` +
+        `(${commitment.monitoring.consecutive_failures || 0} consecutive failures, ` +
+        `grace expires ${deadline.toISOString()})`
+    };
   }
 
   _validateCommitment(commitment) {

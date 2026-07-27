@@ -155,27 +155,38 @@ class MonitoringService {
   async checkCommitment(commitment) {
     const platform = commitment.criteria.platform;
 
-    let newEvidence = [];
-    switch (platform) {
-      case 'moltbook':
-        newEvidence = await this._collectMoltbookEvidence(commitment);
-        break;
-      case 'clawstr':
-        newEvidence = await this._collectClawstrEvidence(commitment);
-        break;
-      // telegram, github, onchain - stubs for Phase 1
-      default:
-        this._log(`Platform ${platform} monitoring not yet implemented`);
-        return;
+    let collected;
+    try {
+      switch (platform) {
+        case 'moltbook':
+          collected = { evidence: await this._collectMoltbookEvidence(commitment), ok: true };
+          break;
+        case 'clawstr':
+          collected = await this._collectClawstrEvidence(commitment);
+          break;
+        // telegram, github, onchain - stubs for Phase 1
+        default:
+          this._log(`Platform ${platform} monitoring not yet implemented`);
+          return;
+      }
+    } catch (error) {
+      // A failed query is a service fault, not agent inactivity. Record it and
+      // fall through to the expiry check anyway: scoring is still *offered*, and
+      // verification-service's readiness check defers it while the grace window
+      // holds. Returning here instead would mean a lasting outage never scores
+      // at all, leaving a paying customer with a commitment stuck active
+      // forever and no receipt.
+      this._log(`Evidence collection failed for ${commitment.commitment_id}: ${error.message}`);
+      const failed = await this._recordCollection(commitment.commitment_id, {
+        ok: false,
+        error: error.message
+      });
+      if (failed) await this._scoreIfEnded(failed);
+      return;
     }
 
-    // Filter out already-recorded evidence
-    const existingUrls = new Set(commitment.evidence.map(e => e.action_url || e.event_id));
-    const genuinelyNew = newEvidence.filter(e =>
-      !existingUrls.has(e.action_url || e.event_id)
-    );
+    const genuinelyNew = this._selectNewEvidence(commitment.evidence, collected.evidence);
 
-    // Add each new evidence item
     for (const ev of genuinelyNew) {
       await this.verificationService.addEvidence(commitment.commitment_id, ev);
     }
@@ -184,13 +195,82 @@ class MonitoringService {
       this._log(`Added ${genuinelyNew.length} new evidence items to ${commitment.commitment_id}`);
     }
 
-    // Check if commitment has expired -> trigger scoring
-    if (new Date() >= new Date(commitment.end_date)) {
-      if (commitment.status === 'active') {
-        this._log(`Commitment ${commitment.commitment_id} has ended, triggering scoring`);
-        await this.verificationService.scoreVerification(commitment.commitment_id);
+    // Reload before doing anything else: addEvidence above rewrote the file, so
+    // the snapshot this method was handed is stale, and saves are whole-file.
+    const fresh = await this._recordCollection(commitment.commitment_id, { ok: collected.ok });
+    if (!fresh) return;
+
+    await this._scoreIfEnded(fresh);
+  }
+
+  /**
+   * Offer an ended commitment for scoring.
+   *
+   * Whether it is actually scored is verification-service's call: it owns the
+   * grace window that distinguishes "the agent did nothing" from "we could not
+   * reach the relays", and it has to, because getStatus scores from an
+   * unauthenticated poll that never passes through here.
+   */
+  async _scoreIfEnded(commitment) {
+    if (new Date() < new Date(commitment.end_date)) return;
+    if (commitment.status !== 'active') return;
+
+    this._log(`Commitment ${commitment.commitment_id} has ended, offering for scoring`);
+    await this.verificationService.scoreVerification(commitment.commitment_id);
+  }
+
+  /**
+   * Evidence not already recorded, and not duplicated within this batch.
+   *
+   * Keyed on action_url or event_id — whichever the platform produces. Items
+   * with neither are kept rather than collapsed: they used to key on
+   * `undefined`, which entered the seen-set and silently dropped every later
+   * keyless item.
+   */
+  _selectNewEvidence(existingEvidence, newEvidence) {
+    const seen = new Set(
+      (existingEvidence || []).map(e => e.action_url || e.event_id).filter(Boolean)
+    );
+
+    const selected = [];
+    for (const ev of newEvidence) {
+      const key = ev.action_url || ev.event_id;
+      if (!key) {
+        selected.push(ev);
+        continue;
       }
+      // Relays overlap, so the same event can arrive twice in one batch and
+      // would otherwise be counted as two separate actions.
+      if (seen.has(key)) continue;
+      seen.add(key);
+      selected.push(ev);
     }
+    return selected;
+  }
+
+  /**
+   * Reload the commitment and stamp the outcome of this collection attempt.
+   *
+   * `last_success_at` is what lets scoring tell "the agent did nothing" from
+   * "we could not reach the relays", which is the difference between a fair
+   * `failed` and a receipt that libels a paying customer.
+   *
+   * @returns {Promise<Object|null>} the reloaded commitment
+   */
+  async _recordCollection(commitmentId, { ok, error = null }) {
+    const commitment = await dataStore.loadCommitment(commitmentId);
+    if (!commitment) return null;
+
+    const previous = commitment.monitoring || {};
+    commitment.monitoring = {
+      last_attempt_at: new Date().toISOString(),
+      last_success_at: ok ? new Date().toISOString() : (previous.last_success_at || null),
+      last_error: ok ? null : error,
+      consecutive_failures: ok ? 0 : (previous.consecutive_failures || 0) + 1
+    };
+
+    await dataStore.saveCommitment(commitment);
+    return commitment;
   }
 
   /**
@@ -238,52 +318,75 @@ class MonitoringService {
    * Collect evidence from Clawstr
    */
   async _collectClawstrEvidence(commitment) {
-    const agentPubkey = commitment.pubkey || commitment.platform_profiles?.clawstr;
-    if (!agentPubkey) {
+    const rawPubkey = commitment.pubkey || commitment.platform_profiles?.clawstr;
+    if (!rawPubkey) {
       this._log('No Clawstr pubkey for commitment', commitment.commitment_id);
-      return [];
+      return { evidence: [], ok: true };
     }
 
+    // Commitments created through the x402 gate already hold hex. Ones written
+    // by discovery-service or the free API route, and any created before that
+    // gate existed, may hold a raw npub. Normalising here rather than trusting
+    // the stored form makes this the real boundary.
+    let hexPubkey;
     try {
-      // Get events from the relevant subclaw
-      const subclaw = commitment.criteria.subclaw || '/c/ai-freedom';
-      const events = await clawstrApi.getFeed(subclaw, 50);
-
-      // Filter to events by this agent since start date
-      const startTimestamp = Math.floor(new Date(commitment.start_date).getTime() / 1000);
-
-      // Handle hex pubkey (starts with 0x) or npub format
-      let pubkeyToMatch = agentPubkey;
-      if (agentPubkey.startsWith('0x')) {
-        pubkeyToMatch = agentPubkey.slice(2); // Remove 0x prefix
-      } else if (agentPubkey.startsWith('npub')) {
-        // For now, just use the npub as-is
-        // A full implementation would decode bech32 to hex
-        this._log('Warning: npub format not yet fully supported, matching may fail');
-      }
-
-      const relevantEvents = events.filter(event =>
-        (event.pubkey === pubkeyToMatch || event.pubkey === agentPubkey) &&
-        event.created_at >= startTimestamp
-      );
-
-      // Convert to evidence format
-      return relevantEvents.map(event => ({
-        timestamp: new Date(event.created_at * 1000).toISOString(),
-        platform: 'clawstr',
-        action_type: commitment.criteria.action_type || 'post',
-        event_id: event.id,
-        signature: event.sig || '',
-        content_hash: 'sha256:' + crypto.createHash('sha256')
-          .update(event.content || '').digest('hex').slice(0, 32),
-        content_length: (event.content || '').length,
-        content_text: event.content || '',
-        verification_method: 'nostr_signature'
-      }));
+      hexPubkey = clawstrApi.normalizeNostrPubkey(rawPubkey);
     } catch (error) {
-      this._log(`Clawstr evidence collection error: ${error.message}`);
-      return [];
+      // Not recoverable by retrying, so report success-with-nothing rather than
+      // a collection failure that would retry this same value every tick.
+      this._log(
+        `Commitment ${commitment.commitment_id} has an unusable Clawstr pubkey: ${error.message}`
+      );
+      return { evidence: [], ok: true };
     }
+
+    const startTs = Math.floor(new Date(commitment.start_date).getTime() / 1000);
+    const endTs = Math.floor(new Date(commitment.end_date).getTime() / 1000);
+    // created_at is set by the author, so a future-dated event could otherwise
+    // pad a window that has not happened yet. Relays tolerate modest skew, so
+    // allow a small margin rather than cutting exactly at now.
+    const maxTs = Math.min(endTs, Math.floor(Date.now() / 1000) + 300);
+
+    // Deliberately unguarded: a throw here means the query failed, and
+    // checkCommitment must not score that as the agent having done nothing.
+    const { events, relaysOk, relaysTotal } = await clawstrApi.getEventsByAuthor(hexPubkey, {
+      since: startTs,
+      until: endTs
+    });
+
+    const inWindow = events.filter(event =>
+      Number.isFinite(event.created_at) &&
+      event.created_at >= startTs &&
+      event.created_at <= maxTs
+    );
+    if (inWindow.length !== events.length) {
+      this._log(
+        `Dropped ${events.length - inWindow.length} Clawstr events outside the ` +
+        `commitment window for ${commitment.commitment_id}`
+      );
+    }
+
+    const collectedAt = new Date().toISOString();
+    const evidence = inWindow.map(event => ({
+      timestamp: new Date(event.created_at * 1000).toISOString(),
+      // The author controls `timestamp`; this one is our own clock, and is the
+      // only trustworthy record of when the event was actually observed.
+      collected_at: collectedAt,
+      platform: 'clawstr',
+      action_type: commitment.criteria.action_type || 'post',
+      event_id: event.id,
+      signature: event.sig || '',
+      content_hash: 'sha256:' + crypto.createHash('sha256')
+        .update(event.content || '').digest('hex').slice(0, 32),
+      content_length: (event.content || '').length,
+      content_text: event.content || '',
+      verification_method: 'nostr_signature'
+    }));
+
+    // A partial outage still returns events, but the set may be short. Treating
+    // it as a complete collection would let the grace window expire and score a
+    // customer on evidence we know is incomplete.
+    return { evidence, ok: relaysOk === relaysTotal };
   }
 }
 

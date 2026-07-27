@@ -10,6 +10,7 @@ const path = require('path');
 const fs = require('fs').promises;
 const fsSync = require('fs');
 const os = require('os');
+const { bech32 } = require('@scure/base');
 
 // Where to look for the nak binary, in order, when NAK_PATH is not set.
 // scripts/install-nak-railway.sh (run from postinstall on every Railway
@@ -527,6 +528,159 @@ async function getFeed(subclaw, limit = 20) {
   }
 }
 
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * Normalise any accepted Nostr identity form to a bare lowercase 64-char hex
+ * pubkey — the form relays return in `event.pubkey`, and therefore the only
+ * form an author filter can match.
+ *
+ * Decoded in-process rather than through `nak decode`: this runs on the paid
+ * request path, where a subprocess per sale is both latency and a failure mode
+ * (a missing nak would reject every Clawstr verification before payment).
+ *
+ * Throws rather than returning a falsy value — a silently unmatched pubkey
+ * collects zero evidence and scores a paying customer as having done nothing.
+ *
+ * @param {string} value - npub1..., 0x-prefixed hex, or bare 64-char hex
+ * @returns {string} 64-char lowercase hex pubkey
+ */
+function normalizeNostrPubkey(value) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error('Nostr pubkey is required');
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed.toLowerCase().startsWith('npub1')) {
+    let decoded;
+    try {
+      // npub is 63 chars; bech32's default limit is 90, passed explicitly so a
+      // library default change cannot silently start rejecting valid input.
+      decoded = bech32.decode(trimmed.toLowerCase(), 90);
+    } catch (error) {
+      throw new Error(`Invalid npub (bech32 decode failed): ${error.message}`);
+    }
+    if (decoded.prefix !== 'npub') {
+      throw new Error(`Expected an npub, got prefix "${decoded.prefix}"`);
+    }
+    const bytes = bech32.fromWords(decoded.words);
+    if (bytes.length !== 32) {
+      throw new Error(`Invalid npub: expected 32 bytes, got ${bytes.length}`);
+    }
+    return Buffer.from(bytes).toString('hex');
+  }
+
+  const bare = (trimmed.startsWith('0x') ? trimmed.slice(2) : trimmed).toLowerCase();
+  if (HEX64.test(bare)) {
+    return bare;
+  }
+
+  throw new Error(
+    `Invalid Nostr pubkey "${trimmed}": expected an npub1... or a 64-character hex key`
+  );
+}
+
+/**
+ * Fetch every kind-1111 event published by one author inside a time window.
+ *
+ * This is the evidence query for a paid verification, so it deliberately does
+ * not behave like getFeed:
+ *
+ * - It **throws** instead of returning []. getFeed's swallow-and-degrade is
+ *   right for a heartbeat and wrong here: a relay outage that yields zero
+ *   events is indistinguishable from an agent that did nothing, and scores the
+ *   customer `failed`.
+ * - It reports relay health. nak exits 0 when *some* relays connected, printing
+ *   the failures only to stderr, so a caller that ignores stderr cannot tell a
+ *   genuine empty result from a partial outage.
+ * - It does not slice to `limit`. nak applies -l per relay, so the union across
+ *   CONFIG.relays legitimately exceeds it (verified: -l 5 over 3 relays returns
+ *   6 unique events). Slicing would discard real evidence.
+ * - It bypasses executeNak, whose "stderr mentions ok. and stdout is empty ->
+ *   success" branch is exactly the silent under-count described above.
+ *
+ * @param {string} hexPubkey - 64-char hex author pubkey
+ * @param {object} options - { since, until } unix seconds, { limit } per relay
+ * @returns {Promise<{events: array, relaysOk: number, relaysTotal: number}>}
+ */
+async function getEventsByAuthor(hexPubkey, { since, until, limit = 500 } = {}) {
+  if (!HEX64.test(hexPubkey || '')) {
+    // Guarded before the spawn so a bad value never becomes an argv element.
+    throw new Error(`getEventsByAuthor requires a 64-char hex pubkey, got "${hexPubkey}"`);
+  }
+
+  const args = ['req', '-k', '1111', '-a', hexPubkey];
+  // Only when set: nak renders an unset -s/-u as a 1969 timestamp.
+  if (Number.isFinite(since)) args.push('-s', String(Math.floor(since)));
+  if (Number.isFinite(until)) args.push('-u', String(Math.floor(until)));
+  args.push('-l', String(limit), ...CONFIG.relays);
+
+  const attempts = 2;
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      const result = await spawnNak(args, CONFIG.timeout);
+      return parseAuthorEvents(result, limit);
+    } catch (error) {
+      lastError = error;
+      console.error(`[Clawstr] getEventsByAuthor attempt ${attempt}/${attempts} failed: ${error.message}`);
+      if (attempt < attempts) {
+        await new Promise(resolve => setTimeout(resolve, CONFIG.retryDelay * attempt));
+      }
+    }
+  }
+
+  throw new Error(
+    `Clawstr author query failed after ${attempts} attempts: ${lastError.message}`
+  );
+}
+
+/**
+ * Turn a nak req result into events plus relay health.
+ * Split out from getEventsByAuthor so the parsing is testable without a spawn.
+ */
+function parseAuthorEvents(result, limit) {
+  const relaysTotal = CONFIG.relays.length;
+  // nak prints one "connecting to <url>... ok." per relay it reached; a failure
+  // prints the reason instead, on the same stream, and does not affect the exit
+  // code as long as at least one relay answered.
+  const relaysOk = ((result.stderr || '').match(/\.\.\.\s*ok\./g) || []).length;
+  if (relaysOk < relaysTotal) {
+    console.warn(
+      `[Clawstr] Only ${relaysOk}/${relaysTotal} relays answered; ` +
+      `a zero or short result may be an outage rather than agent inactivity`
+    );
+  }
+
+  const byId = new Map();
+  for (const line of (result.stdout || '').split('\n')) {
+    if (!line.trim()) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (error) {
+      console.warn(`[Clawstr] Skipping unparseable event line: ${line.slice(0, 120)}`);
+      continue;
+    }
+    // Relays overlap. A duplicate here would be counted as a second action.
+    if (event && event.id && !byId.has(event.id)) {
+      byId.set(event.id, event);
+    }
+  }
+
+  const events = [...byId.values()].sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+
+  if (events.length >= limit) {
+    console.warn(
+      `[Clawstr] Author query returned ${events.length} events at limit ${limit}; ` +
+      `the window may be truncated and evidence under-counted`
+    );
+  }
+
+  return { events, relaysOk, relaysTotal };
+}
+
 /**
  * Get notifications (mentions and replies)
  *
@@ -668,6 +822,8 @@ module.exports = {
   createReply,
   react,
   getFeed,
+  getEventsByAuthor,
+  normalizeNostrPubkey,
   getNotifications,
   setProfile,
   getProfile,

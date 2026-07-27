@@ -13,11 +13,20 @@
 // handler responds >= 400, so rejecting here means the caller is not charged.
 
 const { ValidationError } = require('./validation-error');
+const { normalizeNostrPubkey } = require('./clawstr-api');
 
-// Platforms with a real collector. The monitoring service also has telegram,
-// github and onchain branches, but they fall through to "not yet implemented"
-// and would collect nothing.
-const SUPPORTED_PLATFORMS = ['moltbook', 'clawstr'];
+// Platforms with a collector that can actually attribute evidence to one agent.
+//
+// Moltbook is deliberately absent. Its collector is implemented, but it queries
+// moltbookApi.search(handle), a semantic *text* search, and then filters only by
+// date — never by author. Any post merely mentioning the handle becomes that
+// agent's evidence, so a third party can mint it. Moltbook exposes no
+// author-scoped endpoint, so the fix needs live probing of the /search response
+// shape and must fail closed. Selling that is worse than not selling it.
+//
+// telegram, github and onchain have no collector at all; checkCommitment falls
+// through to "not yet implemented" and collects nothing.
+const SUPPORTED_PLATFORMS = ['clawstr'];
 
 /**
  * @param {Object} input
@@ -43,13 +52,23 @@ function resolveMonitoringTarget({ platform, platform_handle }) {
 
   const handle = platform_handle.trim();
 
-  // Clawstr evidence is fetched by Nostr pubkey, which the collector reads from
-  // `pubkey` first. Setting it here is also what lets the EAS attestation
-  // resolve a recipient wallet instead of being skipped.
-  const pubkey = platform === 'clawstr' ? handle : '';
+  // Normalise to hex here, at the point of sale, so exactly one identity format
+  // is ever persisted. Relays return hex in event.pubkey, so a raw npub in
+  // `pubkey` matches nothing and the commitment collects zero evidence while
+  // looking perfectly valid. Rejecting a malformed handle now also means the
+  // caller sees a 400 and is not charged.
+  let pubkey = '';
+  if (platform === 'clawstr') {
+    try {
+      pubkey = normalizeNostrPubkey(handle);
+    } catch (error) {
+      throw new ValidationError(`Invalid clawstr platform_handle: ${error.message}`);
+    }
+  }
 
   return {
     platform,
+    // The handle as given, for display. The collector must read `pubkey`.
     platform_profiles: { [platform]: handle },
     pubkey
   };
