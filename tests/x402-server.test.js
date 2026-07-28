@@ -282,6 +282,15 @@ describe('x402 verification server', () => {
       expect(res.body).toEqual({ error: 'Verification not found' });
     });
 
+    it('reports collection health so a deferral is not mistaken for a hang', async () => {
+      const created = await request(server).post('/api/x402/verify/premium').send(validPayload);
+      const res = await request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`);
+
+      expect(res.status).toBe(200);
+      // No tick has run in-process, so nothing has written a monitoring block.
+      expect(res.body.collection).toEqual({ state: 'not_monitored' });
+    });
+
     it('reports status for a real commitment', async () => {
       const created = await request(server).post('/api/x402/verify/premium').send(validPayload);
       const res = await request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`);

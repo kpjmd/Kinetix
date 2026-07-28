@@ -334,6 +334,66 @@ describe('VerificationService', () => {
     });
   });
 
+  // The status route is unauthenticated and is what a buyer — or an OKX
+  // reviewer — polls. A deferred commitment must not look like a hung one.
+  describe('_collectionSummary', () => {
+    const hoursAgo = h => new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
+    const hoursAhead = h => new Date(Date.now() + h * 60 * 60 * 1000).toISOString();
+
+    it('says nothing is monitoring when nothing is', () => {
+      // The free API route creates commitments no collector ever touches.
+      const summary = service._collectionSummary({ status: 'active', end_date: hoursAhead(1) });
+      expect(summary).toEqual({ state: 'not_monitored' });
+    });
+
+    it('reports collecting while the window is still open', () => {
+      const summary = service._collectionSummary({
+        status: 'active',
+        end_date: hoursAhead(5),
+        monitoring: { last_success_at: hoursAgo(1), last_attempt_at: hoursAgo(1), consecutive_failures: 0 }
+      });
+      expect(summary.state).toBe('collecting');
+      expect(summary.last_success_at).toEqual(expect.any(String));
+    });
+
+    it('explains a deferral, with the deadline, instead of just saying active', () => {
+      const summary = service._collectionSummary({
+        status: 'active',
+        end_date: hoursAgo(2),
+        monitoring: { last_success_at: hoursAgo(6), last_attempt_at: hoursAgo(0.1), consecutive_failures: 4 }
+      });
+      expect(summary.state).toBe('awaiting_collection');
+      expect(summary.consecutive_failures).toBe(4);
+      expect(Date.parse(summary.grace_expires_at)).toBeGreaterThan(Date.now());
+    });
+
+    it('reports complete once the commitment has been scored', () => {
+      const summary = service._collectionSummary({
+        status: 'verified',
+        end_date: hoursAgo(2),
+        monitoring: { last_success_at: hoursAgo(1), last_attempt_at: hoursAgo(1), consecutive_failures: 0 }
+      });
+      expect(summary.state).toBe('complete');
+      expect(summary.grace_expires_at).toBeUndefined();
+    });
+
+    it('never exposes the raw collection error to an anonymous caller', () => {
+      // It names relay hosts and failure modes; this route needs no auth.
+      const summary = service._collectionSummary({
+        status: 'active',
+        end_date: hoursAgo(1),
+        monitoring: {
+          last_success_at: null,
+          last_attempt_at: hoursAgo(0.1),
+          consecutive_failures: 2,
+          last_error: 'failed to connect to wss://relay.internal.example'
+        }
+      });
+      expect(JSON.stringify(summary)).not.toMatch(/relay\.internal|wss:\/\//);
+      expect(summary.last_error).toBeUndefined();
+    });
+  });
+
   describe('addEvidence', () => {
     const activeCommitment = () => ({
       commitment_id: 'cmt_kx_test',
