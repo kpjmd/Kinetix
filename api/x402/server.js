@@ -94,10 +94,15 @@ app.get('/api/v1/attestation/:receipt_id', async (req, res, next) => {
   }
 });
 
-// Free: check verification status. getStatus() triggers scoring once the
-// commitment window has closed, which is what writes the attestation to this
-// process's DATA_DIR — without this route the lookup above could never find a
-// receipt, since scoring otherwise only runs in the Telegram bot process.
+// Free: check verification status. getStatus() offers the commitment for
+// scoring once its window has closed, which is what writes the attestation to
+// this process's DATA_DIR.
+//
+// Scoring may legitimately be deferred after the window closes — it waits for
+// an evidence collection that succeeded since then, so a relay outage is never
+// scored as agent inactivity. The `collection` block in the response says
+// whether that is happening and when the wait ends, so a caller can tell a
+// deferral from a hang.
 app.get('/api/x402/verify/:id/status', async (req, res, next) => {
   try {
     const status = await verificationService.getStatus(req.params.id);

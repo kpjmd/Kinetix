@@ -157,8 +157,60 @@ class VerificationService {
       created_at: commitment.created_at,
       end_date: commitment.end_date,
       scoring_result: commitment.scoring_result,
-      receipt_id: commitment.receipt_id || null
+      receipt_id: commitment.receipt_id || null,
+      collection: this._collectionSummary(commitment)
     };
+  }
+
+  /**
+   * Public, sanitised view of how evidence collection is going.
+   *
+   * Without this, a commitment held back by the grace window reports plain
+   * `active` past its own end_date with no explanation — indistinguishable
+   * from a hung service to the buyer who paid for it, or to a marketplace
+   * reviewer probing the free status route.
+   *
+   * Deliberately omits the raw `last_error`. It is our own message, but it
+   * names relay hosts and failure modes, and this route is unauthenticated —
+   * the same reason sendVerificationError does not echo error.message.
+   */
+  _collectionSummary(commitment) {
+    const monitoring = commitment.monitoring;
+
+    // Nothing collects for this commitment: the free API route, or a platform
+    // with no collector. Saying "awaiting collection" would be a lie.
+    if (!monitoring) {
+      return { state: 'not_monitored' };
+    }
+
+    const summary = {
+      state: 'collecting',
+      last_success_at: monitoring.last_success_at || null,
+      last_attempt_at: monitoring.last_attempt_at || null,
+      consecutive_failures: monitoring.consecutive_failures || 0
+    };
+
+    if (commitment.status !== 'active') {
+      summary.state = 'complete';
+      return summary;
+    }
+
+    if (new Date() < new Date(commitment.end_date)) {
+      return summary;
+    }
+
+    // Window closed but still active: scoring is being deferred. Say so, and
+    // say when the wait ends, so the caller can tell a delay from a hang.
+    const readiness = this._collectionReadiness(commitment);
+    if (!readiness.ready) {
+      const graceHours = this.rules.monitoring?.collection_grace_hours ?? 24;
+      summary.state = 'awaiting_collection';
+      summary.grace_expires_at = new Date(
+        new Date(commitment.end_date).getTime() + graceHours * 60 * 60 * 1000
+      ).toISOString();
+    }
+
+    return summary;
   }
 
   /**
