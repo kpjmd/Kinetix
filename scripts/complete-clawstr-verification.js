@@ -69,8 +69,8 @@ async function main() {
   console.log('  Status:', scoreResult.status);
   console.log('  Overall Score:', scoreResult.overall_score);
   console.log('  Completion Rate:', scoreResult.completion_rate + '%');
-  console.log('  Days Completed:', scoreResult.days_completed);
-  console.log('  Days Missed:', scoreResult.days_missed);
+  console.log('  Actions Completed:', scoreResult.actions_completed);
+  console.log('  Actions Missed:', scoreResult.actions_missed);
   console.log('');
 
   // Step 2: Issue attestation

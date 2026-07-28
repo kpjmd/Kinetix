@@ -117,6 +117,24 @@ describe('ReconciliationService', () => {
       expect(reputationService.initialize).not.toHaveBeenCalled();
     });
 
+    it('does not burn retry budget when Kinetix\'s own identity is unreadable', async () => {
+      // This fired on the x402 service, whose volume had no identity record.
+      // Untyped it fell through to `failed`, counted as a submission attempt,
+      // and would have escalated every receipt issued during the outage to
+      // terminal failed_permanent after ten runs — for an operator-fixable
+      // config problem where nothing was ever submitted.
+      const receipt = makeReceipt({ metadata: { onchain_status: 'pending', onchain_retry_count: 3 } });
+      const err = new Error('Kinetix not registered on base_mainnet. Run registration first.');
+      err.code = 'ISSUER_NOT_REGISTERED';
+      reputationService.submitAttestation.mockRejectedValue(err);
+
+      const outcome = await service.reconcileOne(receipt);
+
+      expect(outcome.status).toBe('deferred');
+      expect(receipt.metadata.onchain_retry_count).toBe(3);
+      expect(receipt.metadata.onchain_status).not.toBe('failed_permanent');
+    });
+
     it('escalates to failed_permanent once a generic failure reaches the retry cap', async () => {
       const receipt = makeReceipt({ metadata: { onchain_status: 'failed', onchain_retry_count: 9 } });
       reputationService.submitAttestation.mockRejectedValue(new Error('network error'));

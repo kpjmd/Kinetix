@@ -59,8 +59,9 @@ json{
     "quality_score": 87,
     "timeliness_score": 95,
     "overall_score": 94,
-    "days_completed": 7,
-    "days_missed": 0,
+    "actions_required": 7,
+    "actions_completed": 7,
+    "actions_missed": 0,
     "evidence_count": 7
   },
   
@@ -208,8 +209,10 @@ json{
   "quality_score": 87,             // 0-100
   "timeliness_score": 95,          // 0-100
   "overall_score": 94,             // Weighted composite
-  "days_completed": 7,
-  "days_missed": 0,
+  "actions_required": 7,           // Target the receipt was scored against
+  "actions_completed": 7,          // Evidence items that met the criteria
+
+  "actions_missed": 0,
   "evidence_count": 7
 }
 Status values:
@@ -522,8 +525,8 @@ json{
   "verification_result": {
     "status": "partial",
     "completion_rate": 60,
-    "days_completed": 3,
-    "days_missed": 2,
+    "actions_completed": 3,
+    "actions_missed": 2,
     "overall_score": 60
   },
   "evidence": [
@@ -599,8 +602,9 @@ typescriptinterface VerificationReceipt {
     quality_score: number;
     timeliness_score: number;
     overall_score: number;
-    days_completed: number;
-    days_missed: number;
+    actions_required: number;
+    actions_completed: number;
+    actions_missed: number;
     evidence_count: number;
   };
   

@@ -82,7 +82,14 @@ class ERC8004ReputationService {
     // Load Kinetix token ID from identity file
     const identity = await dataStore.loadERC8004Identity(network);
     if (!identity) {
-      throw new Error(`Kinetix not registered on ${network}. Run registration first.`);
+      // Typed, because reconciliation classifies failures by code. This is an
+      // issuer-side configuration problem — no submission was attempted — so it
+      // must not burn a receipt's retry budget the way a real on-chain failure
+      // does. Untyped, it fell through to `failed` and escalated every affected
+      // receipt to terminal `failed_permanent` after ten runs.
+      const err = new Error(`Kinetix not registered on ${network}. Run registration first.`);
+      err.code = 'ISSUER_NOT_REGISTERED';
+      throw err;
     }
     this.kinetixTokenId = identity.tokenId;
 

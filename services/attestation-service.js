@@ -66,7 +66,10 @@ class AttestationService {
 
     // Build receipt (all fields except signatures)
     const receipt = {
-      receipt_version: '1.0.0',
+      // 1.1.0: verification_result reports actions_completed/required/missed
+      // where it previously said days_completed/days_missed. The fields always
+      // counted evidence items, not days.
+      receipt_version: '1.1.0',
       receipt_id: receiptId,
       receipt_type: 'verification_attestation',
 
@@ -139,7 +142,7 @@ class AttestationService {
         dispute_window_days: 7,
         dispute_deadline: disputeDeadline,
         onchain_status: 'pending',
-        schema_version: '1.0.0'
+        schema_version: '1.1.0'
       },
 
       reputation_context: {

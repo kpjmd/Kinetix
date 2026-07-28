@@ -52,8 +52,8 @@ describe('VerificationService', () => {
 
       const result = service._scoreConsistency(commitment, evidence);
       expect(result.status).toBe('partial');
-      expect(result.days_completed).toBe(3);
-      expect(result.days_missed).toBe(4);
+      expect(result.actions_completed).toBe(3);
+      expect(result.actions_missed).toBe(4);
     });
 
     it('should score zero completion as failed', () => {
@@ -237,23 +237,47 @@ describe('VerificationService', () => {
       expect(result.status).not.toBe('verified');
     });
 
-    it('never reports a negative days_missed when the target is exceeded', () => {
+    it('states the target it scored against, in actions rather than days', () => {
+      // These fields always counted evidence items. As days_completed they
+      // produced `days_completed: 3` beside `duration_days: 1` in a signed
+      // receipt, which reads as a contradiction to anyone auditing it.
+      const result = service._scoreConsistency(
+        { criteria: { frequency: 'daily', duration_days: 1, minimum_actions: 1 } },
+        evidenceFor(3)
+      );
+
+      expect(result.actions_required).toBe(1);
+      expect(result.actions_completed).toBe(3);
+      expect(result).not.toHaveProperty('days_completed');
+      expect(result).not.toHaveProperty('days_missed');
+    });
+
+    it('states the target even when nothing was collected', () => {
+      const result = service._scoreConsistency(
+        { criteria: { frequency: 'daily', duration_days: 7 } },
+        []
+      );
+      expect(result.actions_required).toBe(7);
+      expect(result.actions_completed).toBe(0);
+    });
+
+    it('never reports a negative actions_missed when the target is exceeded', () => {
       // Collection returns the whole window, so overshooting the target is
       // normal — and required - completed went negative in a signed receipt.
       const result = service._scoreConsistency(
         { criteria: { frequency: 'daily', duration_days: 3, minimum_actions: 3 } },
         evidenceFor(12)
       );
-      expect(result.days_missed).toBe(0);
+      expect(result.actions_missed).toBe(0);
       expect(result.completion_rate).toBe(100);
     });
 
-    it('reports a numeric days_missed when the commitment collected nothing', () => {
+    it('reports a numeric actions_missed when the commitment collected nothing', () => {
       const result = service._scoreConsistency(
         { criteria: { frequency: 'daily', duration_days: 7 } },
         []
       );
-      expect(result.days_missed).toBe(7);
+      expect(result.actions_missed).toBe(7);
     });
 
     it('rejects a non-positive minimum_actions at creation', () => {
