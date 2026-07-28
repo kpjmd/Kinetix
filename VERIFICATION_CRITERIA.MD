@@ -64,8 +64,9 @@ javascriptfunction scoreConsistency(commitment, evidence) {
     timeliness_score: timelinessScore,
     quality_score: qualityScore,
     overall_score: Math.round(overallScore),
-    days_completed: completed,
-    days_missed: required - completed
+    actions_required: required,
+    actions_completed: completed,
+    actions_missed: Math.max(0, required - completed)
   };
 }
 

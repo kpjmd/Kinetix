@@ -44,8 +44,8 @@ describe('AttestationService', () => {
           quality_score: 90,
           timeliness_score: 95,
           overall_score: 94,
-          days_completed: 7,
-          days_missed: 0,
+          actions_completed: 7,
+          actions_missed: 0,
           evidence_count: 1
         }
       };
@@ -53,7 +53,7 @@ describe('AttestationService', () => {
       const receipt = await service.generateReceipt(commitment);
 
       // Schema checks
-      expect(receipt.receipt_version).toBe('1.0.0');
+      expect(receipt.receipt_version).toBe('1.1.0');
       expect(receipt.receipt_id).toMatch(/^rcpt_kx_/);
       expect(receipt.receipt_type).toBe('verification_attestation');
       expect(receipt.issuer.name).toBe('Kinetix');

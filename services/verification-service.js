@@ -563,8 +563,12 @@ class VerificationService {
         timeliness_score: 0,
         quality_score: 0,
         overall_score: 0,
-        days_completed: 0,
-        days_missed: required,
+        // actions, not days: these count evidence items. A 1-day commitment
+        // legitimately completes 3 actions, which as `days_completed: 3` beside
+        // `duration_days: 1` read as a contradiction in a signed receipt.
+        actions_required: required,
+        actions_completed: 0,
+        actions_missed: required,
         evidence_count: evidence.length
       };
     }
@@ -586,11 +590,14 @@ class VerificationService {
       timeliness_score: Math.round(timelinessScore),
       quality_score: Math.round(qualityScore),
       overall_score: Math.round(overallScore),
-      days_completed: completed,
+      // The target is stated explicitly rather than left implicit in the
+      // completion rate, so a receipt says what it was scored against.
+      actions_required: required,
+      actions_completed: completed,
       // Clamped: exceeding the target is normal now that collection returns the
       // whole window, and a negative "missed" count in a signed receipt reads
       // as a bug to anyone auditing it.
-      days_missed: Math.max(0, required - completed),
+      actions_missed: Math.max(0, required - completed),
       evidence_count: evidence.length
     };
   }

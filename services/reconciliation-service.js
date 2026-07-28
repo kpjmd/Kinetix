@@ -464,6 +464,11 @@ class ReconciliationService {
     } else if (error.code === 'GAS_CEILING' || error.message?.startsWith('GAS_CEILING:')) {
       // Transient gas spike — defer, do not fail, do not burn retry budget.
       status = 'deferred';
+    } else if (error.code === 'ISSUER_NOT_REGISTERED') {
+      // Kinetix's own identity record was unreadable, so nothing was submitted.
+      // Operator-fixable and retryable once it is; failing it here would make a
+      // config mistake permanently terminal for every receipt issued during it.
+      status = 'deferred';
     }
 
     // B8: only a genuine submission attempt (an actual on-chain failure) burns

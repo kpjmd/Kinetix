@@ -10,6 +10,7 @@ const {
 const verificationService = require('../../services/verification-service');
 const { deriveMinimumActions } = verificationService;
 const monitoringService = require('../../services/monitoring-service');
+const reconciliationService = require('../../services/reconciliation-service');
 const attestationService = require('../../services/attestation-service');
 const verificationRules = require('../../config/verification-rules.json');
 const dataStore = require('../../services/data-store');
@@ -717,11 +718,27 @@ function start() {
       monitoringService.start(intervalMinutes, { immediate: true });
       console.log(`✓ Evidence collection every ${intervalMinutes} min (nak: ${clawstrApi.resolveNakPath()})`);
 
-      // Railway sends SIGTERM on redeploy. Stop the timer so a tick cannot be
-      // torn down midway through writing a commitment.
+      // Same reasoning as the collection loop: reconciliation reads receipts
+      // from this process's volume, so the bot's reconciler can never see a
+      // receipt issued here. Without it an on-chain submission that failed at
+      // issuance stays `pending` forever, which reads as a stuck submission to
+      // anyone auditing the receipt.
+      //
+      // Safe because the volumes are separate. `this.running` is a per-process
+      // guard, so if the two services ever shared one, their timers would race;
+      // STALE_SUBMITTING_MS and terminal-status filtering are advisory, not a
+      // lock.
+      reconciliationService.initialize();
+      const reconcileInterval = verificationRules.onchain_reconciliation?.check_interval_minutes || 180;
+      reconciliationService.start(reconcileInterval);
+      console.log(`✓ On-chain reconciliation every ${reconcileInterval} min`);
+
+      // Railway sends SIGTERM on redeploy. Stop the timers so a tick cannot be
+      // torn down midway through writing a commitment or a receipt.
       const shutdown = signal => {
-        console.log(`\n${signal} received, stopping evidence collection`);
+        console.log(`\n${signal} received, stopping background work`);
         monitoringService.stop();
+        reconciliationService.stop();
         server.close(() => process.exit(0));
       };
       process.once('SIGTERM', () => shutdown('SIGTERM'));

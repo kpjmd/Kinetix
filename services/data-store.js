@@ -10,6 +10,14 @@ const BASE_DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const COMMITMENTS_DIR = path.join(BASE_DATA_DIR, 'commitments');
 const ATTESTATIONS_DIR = path.join(BASE_DATA_DIR, 'attestations');
 const ERC8004_DIR = path.join(BASE_DATA_DIR, 'erc8004');
+
+// The ERC-8004 identity records are git-tracked (see the note in .gitignore), so
+// they ship inside the deploy image here regardless of where DATA_DIR points.
+// When DATA_DIR is a mounted volume — as on Railway — a service that never ran
+// the registration script has an empty erc8004/ directory on that volume, and
+// the identity is only findable via this path. Read-only fallback; nothing
+// writes here.
+const PACKAGED_ERC8004_DIR = path.join(__dirname, '../data/erc8004');
 const REPUTATION_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'erc8004/reputation-submissions');
 const EAS_DIR = path.join(BASE_DATA_DIR, 'eas');
 const EAS_SUBMISSIONS_DIR = path.join(BASE_DATA_DIR, 'eas/submissions');
@@ -286,14 +294,31 @@ async function saveERC8004Identity(network, data) {
  * @returns {Promise<Object|null>}
  */
 async function loadERC8004Identity(network) {
-  const filePath = path.join(ERC8004_DIR, `identity-${network}.json`);
-  try {
-    const content = await fs.readFile(filePath, 'utf-8');
-    return JSON.parse(content);
-  } catch (error) {
-    if (error.code === 'ENOENT') return null;
-    throw error;
+  // The volume copy wins, so a re-registration stays authoritative. The packaged
+  // copy is the fallback: it records a real on-chain registration and is
+  // identical, but it is invisible to a service whose DATA_DIR is a fresh
+  // volume. Without this, `Kinetix not registered on <network>` is raised on a
+  // network where Kinetix demonstrably *is* registered, and every ERC-8004
+  // submission from that service fails at init.
+  const candidates = [
+    { dir: ERC8004_DIR, source: 'data dir' },
+    { dir: PACKAGED_ERC8004_DIR, source: 'packaged copy' }
+  ];
+
+  for (const { dir, source } of candidates) {
+    const filePath = path.join(dir, `identity-${network}.json`);
+    try {
+      const identity = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+      if (source !== 'data dir') {
+        console.log(`[DataStore] ERC-8004 identity for ${network} loaded from ${source} (${filePath})`);
+      }
+      return identity;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+    }
   }
+
+  return null;
 }
 
 /**

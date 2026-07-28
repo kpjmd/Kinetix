@@ -93,7 +93,7 @@ json
     "status": "verified",
     "completion_rate": 100,
     "quality_score": 95,
-    "days_completed": 7
+    "actions_completed": 7
   },
   "timestamp": "2025-02-14T12:00:00Z",
   "signature": "0x8f3a2b...",
