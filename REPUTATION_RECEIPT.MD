@@ -3,16 +3,46 @@ Design Principles
 
 Machine-parsable - Strict JSON schema, type-safe
 Human-readable - Clear field names, no cryptic abbreviations
-Cryptographically signed - EIP-712 compatible for onchain migration
+Cryptographically signed - EIP-191 personal_sign over a canonical payload, with
+  the same digest anchored on-chain via EAS and ERC-8004
 Tamper-evident - Hash chain, immutable once issued
 Gaming-resistant - Includes evidence trail, verifiable on-chain
 Composable - Works across platforms, protocols, wallets
 Portable - Self-contained, no external dependencies to validate
 
 
+Schema History
+This document describes 2.0.0. A receipt states its own version in
+receipt_version, and because that field is inside the signed payload it can
+never be updated in place — so receipts issued under an earlier schema keep
+their original version and field names forever. Reading an older shape is
+expected, not a sign of a failed deploy.
+
+2.0.0 (current)
+- verification_result reports actions_completed, actions_missed and the new
+  actions_required. These replace days_completed and days_missed, which always
+  counted evidence items rather than days — the old names produced readings like
+  "days_completed: 3" beside "duration_days: 1" in a signed document.
+- metadata.schema_version is removed. It duplicated receipt_version, and two
+  fields obliged to hold the same value can only ever diverge.
+- The signatures block documents what is actually signed: signature_scheme and
+  canonical_hash replace the eip712_domain this document previously described.
+  Receipts are EIP-191 personal_sign, not EIP-712, and always have been.
+
+The actions_* rename shipped once labelled 1.1.0. A rename is breaking, so that
+was the wrong number; it was corrected to 2.0.0 before any receipt reached an
+external consumer. Treat 1.1.0 as a synonym for the 2.0.0 field shape minus the
+two changes above. Note that criteria.minimum_actions is a commitment *request*
+input, not a receipt field, and is unaffected by any of this.
+
+1.0.0
+- Original schema. verification_result carries days_completed and days_missed,
+  metadata carries schema_version.
+
+
 Base Receipt Schema
 json{
-  "receipt_version": "1.0.0",
+  "receipt_version": "2.0.0",
   "receipt_id": "rcpt_kx_a7f3c2e1b9d4",
   "receipt_type": "verification_attestation",
   
@@ -109,21 +139,16 @@ json{
     "verification_difficulty": "standard",
     "dispute_window_days": 7,
     "dispute_deadline": "2025-02-15T08:15:00Z",
-    "onchain_status": "pending",
-    "schema_version": "1.0.0"
+    "onchain_status": "pending"
   },
   
   "signatures": {
     "receipt_hash": "sha256:e7d9c0e4f6b8e0d1a2b3c4d5e6f7a8b9c0d1e2f3",
     "kinetix_signature": "0x1c3f5e7a9b2d4f6c8e0a2b4d6f8e0c2a4b6d8f0e...",
     "signature_algorithm": "ECDSA_secp256k1",
-    "signed_at": "2025-02-08T08:15:01Z",
-    "eip712_domain": {
-      "name": "KinetixProtocol",
-      "version": "1",
-      "chainId": 8453,
-      "verifyingContract": "0x..." 
-    }
+    "signature_scheme": "eip191_personal_sign(keccak256(canonical_sorted_json))",
+    "canonical_hash": "0x9f2c...",
+    "signed_at": "2025-02-08T08:15:01Z"
   },
   
   "reputation_context": {
@@ -138,7 +163,7 @@ json{
 
 Field Definitions
 Top-Level Fields
-FieldTypeDescriptionRequiredreceipt_versionstringSchema version (semver)Yesreceipt_idstringUnique receipt identifier (rcpt_kx_[random])Yesreceipt_typestringAlways "verification_attestation"YesissuerobjectKinetix identity and proofYesrecipientobjectAgent being verifiedYescommitmentobjectWhat was promisedYesverification_resultobjectOutcome and scoresYesevidencearrayProof of actionsYespaymentobjectFinancial transaction detailsYesmetadataobjectAdministrative dataYessignaturesobjectCryptographic proofYesreputation_contextobjectComparative metricsOptional
+FieldTypeDescriptionRequiredreceipt_versionstringSchema version (semver). The sole version field — read this and nothing else.Yesreceipt_idstringUnique receipt identifier (rcpt_kx_[random])Yesreceipt_typestringAlways "verification_attestation"YesissuerobjectKinetix identity and proofYesrecipientobjectAgent being verifiedYescommitmentobjectWhat was promisedYesverification_resultobjectOutcome and scoresYesevidencearrayProof of actionsYespaymentobjectFinancial transaction detailsYesmetadataobjectAdministrative dataYessignaturesobjectCryptographic proofYesreputation_contextobjectComparative metricsOptional
 
 Issuer Object
 json{
@@ -294,8 +319,7 @@ json{
   "verification_difficulty": "standard",
   "dispute_window_days": 7,
   "dispute_deadline": "2025-02-15T08:15:00Z",
-  "onchain_status": "pending",
-  "schema_version": "1.0.0"
+  "onchain_status": "pending"
 }
 Fields:
 
@@ -305,7 +329,17 @@ kinetix_reputation_impact - Points added to KRS (Phase 2)
 verification_difficulty - trivial|standard|challenging|expert
 dispute_window_days - How long to challenge receipt
 dispute_deadline - After this, receipt is final
-onchain_status - pending|submitted|confirmed|failed
+onchain_status - State of the ERC-8004 reputation submission:
+pending|submitting - not yet resolved; reconciliation will retry
+submitted - written to the Reputation Registry
+skipped_not_registered - the recipient holds no ERC-8004 identity, so there is
+  nothing on-chain to attach reputation to. Terminal, and expected for any
+  agent identified only by a Nostr key or platform handle.
+skipped_self_verification - the recipient resolves to Kinetix's own token, which
+  the registry will not accept. Terminal.
+failed_permanent - retry budget exhausted. Terminal.
+The receipt is signed and IPFS-pinned regardless; a skip records honestly that
+the on-chain leg did not apply, it does not mean the verification failed.
 
 Difficulty levels:
 
@@ -320,21 +354,27 @@ json{
   "receipt_hash": "sha256:e7d9c0e4f6b8e0d1a2b3c4d5e6f7a8b9c0d1e2f3",
   "kinetix_signature": "0x1c3f5e7a9b2d4f6c8e0a2b4d6f8e0c2a4b6d8f0e...",
   "signature_algorithm": "ECDSA_secp256k1",
-  "signed_at": "2025-02-08T08:15:01Z",
-  "eip712_domain": {
-    "name": "KinetixProtocol",
-    "version": "1",
-    "chainId": 8453,
-    "verifyingContract": "0x..."
-  }
+  "signature_scheme": "eip191_personal_sign(keccak256(canonical_sorted_json))",
+  "canonical_hash": "0x9f2c...",
+  "signed_at": "2025-02-08T08:15:01Z"
 }
 Purpose: Cryptographic proof of authenticity.
 How it works:
 
-All receipt fields (except signatures object) are hashed
-Hash is signed with Kinetix's private key
-Anyone can verify signature against Kinetix's public key
-EIP-712 compatible for onchain verification
+The receipt is reduced to a canonical payload: a deep copy with keys recursively
+  sorted and every post-issuance mutable field removed — the signatures block,
+  metadata.onchain_*, reputation_context.ipfs_uri/submission_index/submitted_at,
+  and eas. See utils/receipt-canonical.js for the exact exclusion list.
+receipt_hash is the SHA-256 of that canonical JSON, for human comparison.
+canonical_hash is its keccak256 — the digest actually signed, and the same
+  digest committed on-chain as the EAS receiptHash and the ERC-8004 feedbackHash.
+kinetix_signature is an EIP-191 personal_sign over canonical_hash. Recover the
+  signer with ethers.verifyMessage and compare to issuer.pubkey.
+
+Excluding the mutable fields is what lets a receipt keep verifying after it has
+been anchored on-chain and its tracking fields have moved on. It also means the
+version and field names are inside the signed payload: a stored receipt cannot be
+relabelled to a newer schema without invalidating its signature.
 
 Gaming resistance:
 
@@ -415,7 +455,7 @@ Receipt Storage Formats
 JSON File
 bash# Save as: rcpt_kx_a7f3c2e1b9d4.json
 {
-  "receipt_version": "1.0.0",
+  "receipt_version": "2.0.0",
   # ... full receipt
 }
 Compressed for Sharing
@@ -478,7 +518,7 @@ Evidence items can only be used once
 Receipt Examples
 Example 1: Successful Consistency Verification
 json{
-  "receipt_version": "1.0.0",
+  "receipt_version": "2.0.0",
   "receipt_id": "rcpt_kx_success_001",
   "receipt_type": "verification_attestation",
   "issuer": {
@@ -638,21 +678,22 @@ typescriptinterface VerificationReceipt {
     verification_difficulty: "trivial" | "standard" | "challenging" | "expert";
     dispute_window_days: number;
     dispute_deadline: string;
-    onchain_status: "pending" | "submitted" | "confirmed" | "failed";
-    schema_version: string;
+    onchain_status:
+      | "pending"
+      | "submitting"
+      | "submitted"
+      | "skipped_not_registered"
+      | "skipped_self_verification"
+      | "failed_permanent";
   };
   
   signatures: {
     receipt_hash: string;
     kinetix_signature: string;
     signature_algorithm: string;
+    signature_scheme: string;
+    canonical_hash: string;
     signed_at: string;
-    eip712_domain: {
-      name: string;
-      version: string;
-      chainId: number;
-      verifyingContract: string;
-    };
   };
   
   reputation_context?: {
@@ -670,5 +711,5 @@ This receipt format is:
 ✅ Human-readable (clear field names)
 ✅ Gaming-resistant (cryptographic signatures, verifiable evidence)
 ✅ Portable (works across platforms)
-✅ Onchain-ready (EIP-712 compatible)
+✅ Onchain-anchored (EAS attestation + ERC-8004 feedback, same canonical digest)
 ✅ Composable (can be input to other protocols)

@@ -53,7 +53,10 @@ describe('AttestationService', () => {
       const receipt = await service.generateReceipt(commitment);
 
       // Schema checks
-      expect(receipt.receipt_version).toBe('1.1.0');
+      expect(receipt.receipt_version).toBe('2.0.0');
+      // 2.0.0 removed metadata.schema_version. It duplicated receipt_version,
+      // so a reintroduction would create two fields that can silently disagree.
+      expect(receipt.metadata).not.toHaveProperty('schema_version');
       expect(receipt.receipt_id).toMatch(/^rcpt_kx_/);
       expect(receipt.receipt_type).toBe('verification_attestation');
       expect(receipt.issuer.name).toBe('Kinetix');

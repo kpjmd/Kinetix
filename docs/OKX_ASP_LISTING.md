@@ -125,6 +125,12 @@ and `frequency`, so a 30-day daily commitment targets 30 actions.
 `erc8004_token_id` is optional. Supplying it is what enables the on-chain
 ERC-8004 reputation submission; without it that step is skipped.
 
+A reviewer looking at the example receipt will see `onchain_status:
+"skipped_not_registered"`. That is the honest terminal state for a recipient
+holding no ERC-8004 identity — there is no on-chain agent to attach reputation
+to — and it is what any Nostr-only agent gets. The receipt is still signed,
+IPFS-pinned, and EAS-anchored; only the ERC-8004 leg does not apply.
+
 `wallet_address` is optional and must be an EVM address. It is the recipient of
 the on-chain EAS attestation; a Nostr-only agent can omit it and still receive
 the signed, IPFS-pinned receipt.
@@ -132,10 +138,12 @@ the signed, IPFS-pinned receipt.
 ## Why the status route exists
 
 Attestations are written by `scoreVerification`, which is driven by
-`monitoring-service` in the **Telegram bot process** — a different Railway
-service with a different volume, and Railway volumes cannot be shared. Without
-a way to trigger scoring on this host, the registered free attestation endpoint
-would return 404 for every id a reviewer tried.
+`monitoring-service`. That loop originally ran only in the **Telegram bot
+process** — a different Railway service with a different volume, and Railway
+volumes cannot be shared — so the registered free attestation endpoint would
+have returned 404 for every id a reviewer tried. The loop now also runs in this
+process; the status route below remains the way to force scoring on demand
+rather than waiting for the next tick.
 
 `GET /api/x402/verify/:id/status` calls `getStatus()`, which triggers scoring
 once the commitment window closes and writes the receipt to *this* service's
@@ -169,7 +177,9 @@ otherwise leak container paths to an anonymous caller.
 > time-bound), IPFS pinning of the evidence bundle and receipt, and submission
 > to the ERC-8004 Reputation Registry. Verification windows up to 90 days.
 >
-> Every receipt is EIP-712 signed and independently verifiable. Receipts are
+> Every receipt is signed with EIP-191 personal_sign over the keccak256 of its
+> canonical sorted-key JSON, and states that scheme in
+> `signatures.signature_scheme` so it can be reproduced without asking. Receipts are
 > anchored as EAS attestations on Base under schema UID
 > `0x4dae6f58d1879f9fcac21e45e22e3c3ce156b6ed56fbb2bbe3e5c7bde1178cff`
 > (`string receiptId, bytes32 receiptHash, string verificationType, uint8

@@ -9,6 +9,12 @@ const { canonicalString } = require('../utils/receipt-canonical');
 
 const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
 
+// The receipt schema version, and the only place it is written. It used to be
+// duplicated into metadata.schema_version, two literals seventy lines apart
+// obliged to agree; 2.0.0 removes that field rather than keep maintaining the
+// coincidence. See the "Schema history" section of REPUTATION_RECEIPT.MD.
+const RECEIPT_VERSION = '2.0.0';
+
 class AttestationService {
   constructor() {
     this.signingWallet = null;
@@ -66,10 +72,13 @@ class AttestationService {
 
     // Build receipt (all fields except signatures)
     const receipt = {
-      // 1.1.0: verification_result reports actions_completed/required/missed
-      // where it previously said days_completed/days_missed. The fields always
-      // counted evidence items, not days.
-      receipt_version: '1.1.0',
+      // 2.0.0 relabels what a7b5992 shipped as 1.1.0. That change renamed
+      // days_completed/days_missed to actions_completed/actions_missed (they
+      // always counted evidence items, not days) and added actions_required —
+      // a rename is a breaking change, so a minor bump was the wrong call. This
+      // version also drops metadata.schema_version. Both are only safe to
+      // relabel now, before any receipt has left Kinetix's hands.
+      receipt_version: RECEIPT_VERSION,
       receipt_id: receiptId,
       receipt_type: 'verification_attestation',
 
@@ -141,8 +150,7 @@ class AttestationService {
         verification_difficulty: commitment.difficulty,
         dispute_window_days: 7,
         dispute_deadline: disputeDeadline,
-        onchain_status: 'pending',
-        schema_version: '1.1.0'
+        onchain_status: 'pending'
       },
 
       reputation_context: {
