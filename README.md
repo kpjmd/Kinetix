@@ -1,37 +1,33 @@
 # Kinetix Agent
 
-**Dr. Kinetix** - A musculoskeletal health specialist AI agent for the Moltbook social network.
+**Kinetix** - Verification infrastructure for AI agents. Kinetix verifies agent commitments and issues cryptographically signed attestation receipts (Proof of Action), anchored on-chain via EAS and ERC-8004.
 
 ## Overview
 
-Kinetix is an autonomous AI agent that specializes in biomechanics and musculoskeletal health. It interacts on Moltbook (an AI agent social network) to help other agents understand their humans' physical health issues. Powered by Claude Sonnet 4.5 and integrated with OrthoIQ for specialized medical knowledge.
+Kinetix is an autonomous AI agent that verifies AI agent commitments — consistency, quality, and time-bound claims — against evidence collected from Clawstr (Nostr) and onchain (Base), then issues a signed attestation receipt. It maintains a secondary, rarely-invoked credential in musculoskeletal health (from its original build) that backs its "diagnostic rigor" framing but is not an active service. Powered by Claude Sonnet 4.5.
 
 ## Features
 
-- **Moltbook Integration**: Posts and interacts on the AI agent social network
+- **Verification & Attestation**: Consistency/quality/time-bound commitment verification with signed Proof of Action receipts
+- **x402 Paid Service**: Tiered paid verification via `api/x402/server.js`
+- **Moltbook & Clawstr Integration**: Posts and interacts on both agent social networks (Moltbook posting is event-driven — see `utils/moltbook-announce.js`)
 - **Telegram Bot Interface**: Human oversight and approval system
-- **Health Knowledge Base**: Specialized musculoskeletal expertise via OrthoIQ
 - **Wallet Integration**: $KINETIX token support on Base chain
-- **Approval Mode**: Human-in-the-loop for all postings and transactions
+- **Approval Mode**: Human-in-the-loop for postings and transactions (configurable per `config/agent.json`'s `posting_mode`)
 
 ## Project Structure
 
 ```
 kinetix-agent/
+├── api/                 # x402 paid-service + verification routes
 ├── config/              # Configuration files
+├── services/            # Verification, attestation, monitoring, discovery
 ├── skills/              # Agent capabilities
-│   ├── moltbook/       # Social network integration
-│   ├── telegram/       # Bot interface
-│   ├── health-knowledge/ # Medical expertise
-│   ├── wallet/         # Blockchain interactions
-│   └── orthoiq/        # OrthoIQ API integration
+│   └── verification/    # Verification product config (types, pricing)
 ├── data/               # Agent memory and logs
-│   ├── conversation-history/
-│   ├── consultation-logs/
 │   └── approval-queue/
-├── telegram-bot/       # Telegram bot implementation
-│   └── handlers/
-└── utils/              # Shared utilities
+├── telegram-bot/       # Telegram bot implementation (main entrypoint)
+└── utils/              # Shared utilities (Moltbook/Clawstr clients, heartbeat, EAS/ERC-8004)
 ```
 
 ## Quick Start
@@ -57,7 +53,7 @@ kinetix-agent/
 
 4. **Test in Telegram:**
    - Find your bot and send /start
-   - Try chatting: "Hey Kinetix, explain tech neck"
+   - Try chatting: "Hey Kinetix, what does verification cover?"
    - Check pending posts: /pending
    - Approve the test post: /approve [id]
 
@@ -79,7 +75,6 @@ kinetix-agent/
    - Moltbook API credentials
    - Telegram bot token
    - Coinbase API key (optional, for wallet features)
-   - OrthoIQ API credentials
 
 ## Telegram Bot Setup
 
@@ -203,66 +198,20 @@ Once connection is verified, use the Telegram bot to approve posts:
 
 ## Moltbook Integration
 
-Kinetix uses the official Moltbook skill for posting to the AI agent social network.
-
-### Installation
-
-The Moltbook skill was installed via molthub:
-
-```bash
-npx molthub@latest install moltbook-interact
-```
-
-This creates the skill at `skills/moltbook-interact/`. See `skills/moltbook-interact/SKILL.md` for detailed API documentation.
+Kinetix talks to Moltbook directly via `utils/moltbook-api.js` (axios client against `https://www.moltbook.com/api/v1`) — there is no external skill dependency in the runtime path.
 
 ### Configuration
 
-Moltbook requires credentials stored at `~/.config/moltbook/credentials.json`:
+Set `MOLTBOOK_API_KEY` in `.env` (see `.env.example`). Get your API key from https://www.moltbook.com after signing up; the account is claimed by its human owner via email + X verification.
 
-```bash
-mkdir -p ~/.config/moltbook
-cat > ~/.config/moltbook/credentials.json << 'EOF'
-{
-  "api_key": "your_moltbook_api_key_here",
-  "agent_name": "Kinetix"
-}
-EOF
-chmod 600 ~/.config/moltbook/credentials.json
-```
+### Posting model
 
-Get your API key from https://www.moltbook.com after signing up.
+- **Event-driven announcements**: `utils/moltbook-announce.js` posts when a verification completes — never on a fixed schedule (Moltbook's own `heartbeat.md` explicitly discourages posting "just because it's been a while"). Gated behind `MOLTBOOK_ANNOUNCE_ENABLED=true`.
+- **Heartbeat engagement**: `utils/heartbeat.js` runs on a schedule (default every 4h) and replies to comments on Kinetix's own posts (via `GET /home`), then upvotes/comments on the open feed. It never creates top-level posts.
+- **Manual approval workflow**: posts/comments queued via Telegram (`/pending`, `/approve [id]`, `/reject [id]`) when `posting_mode` in `config/agent.json` is `"approval"` rather than `"autonomous"`.
+- Kinetix's real verified-agent-audience submolt is **aiagents** (confirmed live) — `/agentkinetics` and `/humanbiology` were aspirational and were never actually created on Moltbook.
 
-### Creating Posts
-
-Posts go through an approval workflow:
-
-1. **Queue a post** (via helper functions or manually):
-   ```javascript
-   const { queueMoltbookPost } = require('./utils/moltbook-helpers');
-   await queueMoltbookPost('Post content here', 'general', 'manual');
-   ```
-
-2. **Review in Telegram**: Send `/pending` to see queued posts
-
-3. **Approve or reject**:
-   - `/approve [id]` - Approve and post to Moltbook
-   - `/reject [id]` - Remove from queue
-
-### Test Posts
-
-Create test introduction and submolt announcement posts:
-
-```bash
-npm run test:moltbook
-```
-
-This queues two posts for approval:
-- Introduction post for general
-- Submolt announcement for m/humanbiology
-
-### Submolt
-
-Kinetix manages **m/humanbiology** - a place for agents to learn about their humans' physical health.
+Both post and comment creation locally enforce Moltbook's documented rate floors (1 post/30min, 1 comment/20s, 50 comments/day) via `utils/state-manager.js`, persisted so a restart doesn't reset them.
 
 ## Environment Variables
 
@@ -272,7 +221,6 @@ See `.env.example` for all required configuration variables:
 - **Moltbook**: Social network credentials
 - **Telegram**: Bot token and admin user ID
 - **Wallet**: Coinbase integration and $KINETIX token
-- **OrthoIQ**: Medical knowledge backend
 - **Settings**: Posting mode and spending limits
 
 ## Running the Agent

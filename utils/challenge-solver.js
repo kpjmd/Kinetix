@@ -25,17 +25,33 @@ async function notifyAdmin(message) {
 }
 
 /**
+ * Confirmed live (Jul 2026): moltbookApi passes through the FULL created
+ * resource as challengeData (so callers still have its real id), with the
+ * actual challenge nested under `.verification`:
+ * { verification_code, challenge_text, expires_at, instructions }.
+ * This unwraps that, falling back to a flat shape for robustness in case
+ * Moltbook embeds it differently on another endpoint.
+ * @param {Object} challengeData
+ * @returns {Object} { challengeText, verificationCode, instructions }
+ */
+function getVerificationBlock(challengeData) {
+  const v = challengeData.verification || challengeData;
+  return {
+    challengeText: v.challenge_text || v.challenge || v.problem || JSON.stringify(challengeData),
+    verificationCode: v.verification_code || v.challenge_id || v.id || v.token || null,
+    instructions: v.instructions || null
+  };
+}
+
+/**
  * Use Claude Haiku to decode the obfuscated lobster math problem and return
- * only the numeric answer as a string.
+ * only the numeric answer as a string, formatted per Moltbook's own
+ * instructions (confirmed live: two decimal places, e.g. "28.00").
  * @param {Object} challengeData - Raw challenge object from Moltbook response
  * @returns {Promise<string>} Numeric answer string
  */
 async function solveChallenge(challengeData) {
-  const challengeText =
-    challengeData.challenge ||
-    challengeData.challenge_text ||
-    challengeData.problem ||
-    JSON.stringify(challengeData);
+  const { challengeText, instructions } = getVerificationBlock(challengeData);
 
   console.log('[ChallengeSolver] Solving challenge:', challengeText);
 
@@ -47,7 +63,8 @@ async function solveChallenge(challengeData) {
         role: 'user',
         content:
           'This is an obfuscated lobster-themed math problem. Decode the garbled text and compute the answer. ' +
-          'Return ONLY the number, nothing else. Problem: ' + challengeText
+          (instructions ? `Formatting instructions: ${instructions} ` : 'Return ONLY the number, nothing else. ') +
+          'Problem: ' + challengeText
       }
     ]
   });
@@ -58,8 +75,13 @@ async function solveChallenge(challengeData) {
 }
 
 /**
- * Submit the solved answer back to Moltbook.
- * Tries multiple endpoint patterns and logs everything on failure.
+ * Submit the solved answer back to Moltbook via POST /api/v1/verify.
+ *
+ * Confirmed live (Jul 2026): the correct payload is
+ * { verification_code, answer } — verification_code is the field Moltbook's
+ * own challenge response actually uses, not challenge_id/id/token as
+ * originally guessed. Those guesses are kept as fallbacks only in case a
+ * different endpoint ever embeds the challenge in a different shape.
  * @param {Object} challengeData - Raw challenge object from Moltbook response
  * @param {string} answer - Numeric answer string
  * @returns {Promise<Object>} API response data
@@ -67,78 +89,40 @@ async function solveChallenge(challengeData) {
 async function submitChallengeAnswer(challengeData, answer) {
   const apiKey = process.env.MOLTBOOK_API_KEY;
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-  const baseURL = 'https://www.moltbook.com/api/v1';
+  const { verificationCode } = getVerificationBlock(challengeData);
+  const submitUrl = challengeData.verification?.submit_url || challengeData.submit_url || 'https://www.moltbook.com/api/v1/verify';
 
-  const attempts = [];
+  const payloadAttempts = [];
+  if (verificationCode) payloadAttempts.push({ verification_code: verificationCode, answer });
+  payloadAttempts.push({ answer }); // challenge may be tied server-side to the authenticated agent
 
-  // Attempt 1: use submit_url from challengeData if provided
-  if (challengeData.submit_url) {
-    attempts.push({
-      label: 'submit_url',
-      url: challengeData.submit_url,
-      payload: { answer }
-    });
-  }
-
-  // Attempt 2: POST /challenge/verify with challenge_id
-  if (challengeData.challenge_id) {
-    attempts.push({
-      label: '/challenge/verify',
-      url: `${baseURL}/challenge/verify`,
-      payload: { challenge_id: challengeData.challenge_id, answer }
-    });
-    attempts.push({
-      label: `/challenge/${challengeData.challenge_id}/answer`,
-      url: `${baseURL}/challenge/${challengeData.challenge_id}/answer`,
-      payload: { answer }
-    });
-  }
-
-  // Attempt 3: use token field
-  if (challengeData.token) {
-    attempts.push({
-      label: '/challenge/verify (token)',
-      url: `${baseURL}/challenge/verify`,
-      payload: { token: challengeData.token, answer }
-    });
-  }
-
-  // Attempt 4: generic fallback
-  if (attempts.length === 0) {
-    attempts.push({
-      label: '/challenge/verify (fallback)',
-      url: `${baseURL}/challenge/verify`,
-      payload: { answer }
-    });
-  }
-
-  for (const attempt of attempts) {
+  for (const payload of payloadAttempts) {
     try {
-      console.log(`[ChallengeSolver] Trying ${attempt.label} →`, attempt.url);
-      const res = await axios.post(attempt.url, attempt.payload, { headers, timeout: 15000 });
-      console.log(`[ChallengeSolver] Success via ${attempt.label}:`, res.data);
+      console.log(`[ChallengeSolver] POST ${submitUrl} with payload keys [${Object.keys(payload).join(',')}]`);
+      const res = await axios.post(submitUrl, payload, { headers, timeout: 15000 });
+      console.log(`[ChallengeSolver] Verified:`, res.data);
       return res.data;
     } catch (err) {
       const status = err.response?.status;
       const data = err.response?.data;
-      console.warn(`[ChallengeSolver] ${attempt.label} failed (${status}):`, JSON.stringify(data));
+      console.warn(`[ChallengeSolver] Payload keys [${Object.keys(payload).join(',')}] failed (${status}):`, JSON.stringify(data));
     }
   }
 
   // All attempts failed — log everything and notify admin
   const debugInfo =
-    `[ChallengeSolver] ALL submission attempts failed.\n` +
+    `[ChallengeSolver] ALL submission attempts failed against ${submitUrl}.\n` +
     `challengeData: ${JSON.stringify(challengeData, null, 2)}\n` +
     `answer: ${answer}`;
   console.error(debugInfo);
 
   const adminMsg =
     `⚠️ *Moltbook Challenge Submission Failed*\n\n` +
-    `All endpoint attempts exhausted. Full challenge data logged.\n\n` +
+    `All payload shapes against ${submitUrl} were rejected. Full challenge data logged.\n\n` +
     `\`\`\`\n${JSON.stringify(challengeData, null, 2).slice(0, 800)}\n\`\`\``;
   await notifyAdmin(adminMsg);
 
-  throw new Error('Challenge submission failed on all attempted endpoints — see logs for full challengeData');
+  throw new Error('Challenge submission failed against /api/v1/verify — see logs for full challengeData');
 }
 
 /**

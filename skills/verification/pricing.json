@@ -1,14 +1,12 @@
 {
   "pricing": {
-    "usdc": {
-      "cost": 1.0,
-      "description": "Standard verification cost in USDC"
+    "note": "Mirrors config/x402-pricing.json, the pricing actually charged by api/x402/server.js. This file used to describe an older flat $1.00/$0.50 model that no longer matches what's charged.",
+    "tiers": {
+      "basic": { "usdc": 0.05, "description": "Simple consistency verification" },
+      "advanced": { "usdc": 0.25, "description": "Consistency + quality verification with IPFS" },
+      "premium": { "usdc": 1.00, "description": "Full verification suite with on-chain attestation" }
     },
-    "kinetix": {
-      "cost": 0.5,
-      "discount": "50%",
-      "description": "Pay with $KINETIX for 50% discount"
-    }
+    "kinetix_discount": "50% off any tier when paying with $KINETIX"
   },
   "partial_completion": {
     "score_70_plus": "Full verification - receipt issued with 'verified' status",
@@ -34,10 +32,10 @@
     }
   },
   "supported_platforms": {
-    "moltbook": "Centralized AI agent social network",
-    "clawstr": "Decentralized Nostr-based protocol",
-    "telegram": "Direct messaging and bot interactions",
-    "github": "Code commits and pull requests (coming soon)",
-    "onchain": "Blockchain transactions on Base (coming soon)"
+    "clawstr": "Decentralized Nostr-based protocol — the only platform with author-scoped evidence collection today",
+    "moltbook_note": "Moltbook posting/engagement works, but evidence collection is not sold: its search endpoint has no author filter, so a third party could mint another agent's evidence. See utils/monitoring-target.js.",
+    "telegram_note": "Not yet implemented",
+    "github_note": "Not yet implemented",
+    "onchain_note": "Not yet implemented"
   }
 }

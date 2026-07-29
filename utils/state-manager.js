@@ -6,7 +6,8 @@ const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 const STATE_FILES = {
   heartbeat: 'heartbeat-state.json',
   engagement: 'engagement-history.json',
-  social: 'social-state.json'
+  social: 'social-state.json',
+  moltbookRate: 'moltbook-rate-state.json'
 };
 
 // Default state structures
@@ -34,8 +35,78 @@ const DEFAULTS = {
     clawstr_subclaws: [],  // Subclaws we're active in
     clawstr_pubkey: null,  // Our Nostr public key (npub)
     clawstr_profile_updated: null  // Last profile update timestamp
+  },
+  moltbookRate: {
+    lastPostAt: null,          // ISO timestamp of the last successful post
+    commentTimestamps: []      // ISO timestamps of successful comments, last 24h
   }
 };
+
+// Moltbook's documented floors for an established agent (rules.md):
+// 1 post / 30 min, 1 comment / 20 sec, 50 comments / day.
+const MOLTBOOK_POST_FLOOR_MS = 30 * 60 * 1000;
+const MOLTBOOK_COMMENT_FLOOR_MS = 20 * 1000;
+const MOLTBOOK_COMMENT_DAILY_MAX = 50;
+const MOLTBOOK_COMMENT_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Check whether Moltbook's per-30-minute post floor allows a post right now.
+ * Enforced locally (persisted to disk) so the limit survives a Railway restart
+ * and applies across every caller (heartbeat, Telegram approve, NLP tool).
+ * @returns {Promise<{allowed: boolean, waitMs: number}>}
+ */
+async function checkMoltbookPostAllowed() {
+  const state = await loadState('moltbookRate');
+  if (!state.lastPostAt) return { allowed: true, waitMs: 0 };
+  const elapsed = Date.now() - new Date(state.lastPostAt).getTime();
+  const waitMs = MOLTBOOK_POST_FLOOR_MS - elapsed;
+  return waitMs > 0 ? { allowed: false, waitMs } : { allowed: true, waitMs: 0 };
+}
+
+/**
+ * Record a successful Moltbook post for the rate floor above.
+ */
+async function recordMoltbookPost() {
+  const state = await loadState('moltbookRate');
+  state.lastPostAt = new Date().toISOString();
+  await saveState('moltbookRate', state);
+}
+
+/**
+ * Check whether Moltbook's 20s-between/50-per-day comment floor allows a
+ * comment right now.
+ * @returns {Promise<{allowed: boolean, waitMs: number, reason?: string}>}
+ */
+async function checkMoltbookCommentAllowed() {
+  const state = await loadState('moltbookRate');
+  const cutoff = Date.now() - MOLTBOOK_COMMENT_WINDOW_MS;
+  const recent = state.commentTimestamps.filter(t => new Date(t).getTime() >= cutoff);
+
+  if (recent.length >= MOLTBOOK_COMMENT_DAILY_MAX) {
+    const oldest = new Date(recent[0]).getTime();
+    return { allowed: false, waitMs: oldest + MOLTBOOK_COMMENT_WINDOW_MS - Date.now(), reason: 'daily_max' };
+  }
+
+  const last = recent[recent.length - 1];
+  if (last) {
+    const elapsed = Date.now() - new Date(last).getTime();
+    const waitMs = MOLTBOOK_COMMENT_FLOOR_MS - elapsed;
+    if (waitMs > 0) return { allowed: false, waitMs, reason: 'floor' };
+  }
+
+  return { allowed: true, waitMs: 0 };
+}
+
+/**
+ * Record a successful Moltbook comment for the rate floor above.
+ */
+async function recordMoltbookComment() {
+  const state = await loadState('moltbookRate');
+  const cutoff = Date.now() - MOLTBOOK_COMMENT_WINDOW_MS;
+  state.commentTimestamps = state.commentTimestamps.filter(t => new Date(t).getTime() >= cutoff);
+  state.commentTimestamps.push(new Date().toISOString());
+  await saveState('moltbookRate', state);
+}
 
 /**
  * Load state from JSON file
@@ -178,5 +249,9 @@ module.exports = {
   recordEngagement,
   hasEngaged,
   updateHeartbeat,
-  updateSocial
+  updateSocial,
+  checkMoltbookPostAllowed,
+  recordMoltbookPost,
+  checkMoltbookCommentAllowed,
+  recordMoltbookComment
 };

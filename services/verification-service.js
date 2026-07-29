@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const ipfsManager = require('../utils/ipfs-manager');
 const reputationService = require('../utils/erc8004-reputation');
 const easService = require('../utils/eas-attestation');
+const moltbookAnnounce = require('../utils/moltbook-announce');
 const { ValidationError } = require('../utils/validation-error');
 
 // Actions expected per day for each supported frequency.
@@ -387,8 +388,21 @@ class VerificationService {
     // to this same receipt file. Each method never throws.
     await this._submitToReputationRegistry(receipt, ipfsHash, gatewayUrl);
     await this._submitToEAS(receipt);
+    await this._announceOnMoltbook(receipt);
 
     return receipt;
+  }
+
+  /**
+   * Best-effort Moltbook announcement of the completed verification. Never
+   * throws — receipt issuance must not depend on Moltbook being reachable.
+   */
+  async _announceOnMoltbook(receipt) {
+    try {
+      await moltbookAnnounce.announceVerification(receipt);
+    } catch (error) {
+      this._log(`Moltbook announcement failed (non-fatal)`, { error: error.message });
+    }
   }
 
   /**

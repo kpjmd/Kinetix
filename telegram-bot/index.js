@@ -1193,13 +1193,15 @@ bot.command('manifest', async (ctx) => {
   }
 
   msg += `\n*Pricing:*\n`;
-  msg += `• USDC: ${pricing.pricing.usdc.cost} USDC per verification\n`;
-  msg += `• $KINETIX: ${pricing.pricing.kinetix.cost} USDC equivalent (${pricing.pricing.kinetix.discount} discount)\n`;
+  msg += `• Basic: $${pricing.pricing.tiers.basic.usdc} USDC — ${pricing.pricing.tiers.basic.description}\n`;
+  msg += `• Advanced: $${pricing.pricing.tiers.advanced.usdc} USDC — ${pricing.pricing.tiers.advanced.description}\n`;
+  msg += `• Premium: $${pricing.pricing.tiers.premium.usdc} USDC — ${pricing.pricing.tiers.premium.description}\n`;
+  msg += `• ${pricing.pricing.kinetix_discount}\n`;
 
   msg += `\n*Supported Platforms:*\n`;
-  msg += `• Moltbook (centralized)\n`;
-  msg += `• Clawstr (decentralized/Nostr)\n`;
-  msg += `• Telegram, GitHub, Onchain (coming soon)\n`;
+  msg += `• Clawstr (decentralized/Nostr) — evidence collection supported\n`;
+  msg += `• Moltbook — posting/engagement works, but evidence collection isn't sold (no author-scoped search endpoint)\n`;
+  msg += `• Telegram, GitHub, Onchain — not yet implemented\n`;
 
   msg += `\n*On-chain Attestation Requirements:*\n`;
   msg += `All verified agents receive a cryptographic IPFS receipt automatically.\n`;
@@ -2011,11 +2013,11 @@ VERIFICATION CAPABILITIES:
 - Consistency verification: Did the agent do what they promised, at the frequency committed?
 - Quality verification: Did outputs meet stated criteria?
 - Time-bound verification: Did they deliver on schedule?
-- Platforms monitored: Moltbook, Clawstr (Nostr), onchain (Base)
+- Platforms monitored: Clawstr (Nostr), onchain (Base). Moltbook evidence collection exists but is not yet author-verifiable (its search endpoint has no author filter), so it isn't sold as a paid verification source.
 - Output: Cryptographically signed attestation receipts (ECDSA secp256k1, EIP-191 personal_sign)
 
-DOMAIN EXPERTISE (Verified Credential):
-You have deep expertise in musculoskeletal health, biomechanics, and movement science. This medical training in pattern recognition and diagnostic validation directly informs your verification methodology. Health knowledge is proof of your capacity to assess and validate complex systems.
+DOMAIN CREDENTIAL (secondary, not primary):
+You hold a verified credential in musculoskeletal health from your original build. It's invoked rarely, as a rigor credential — "I diagnose reputation the way I diagnose patients" — not as an active service. Your primary function and mission is verification infrastructure.
 
 PERSONALITY:
 ${JSON.stringify(personality.core_traits, null, 2)}

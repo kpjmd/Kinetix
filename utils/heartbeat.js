@@ -52,29 +52,35 @@ class HeartbeatSystem {
     console.log('[Heartbeat] Starting dual-platform heartbeat check...');
 
     try {
-      // 1. Fetch heartbeat.md from Moltbook
+      // 1. Moltbook's own heartbeat.md ranks responding to replies on your
+      // own posts above everything else, ahead of upvoting/commenting on the
+      // feed. There was previously no code path that ever called /home, so
+      // Kinetix never saw or answered replies — do that first.
+      const replyResult = await this.respondToMoltbookReplies();
+
+      // 2. Fetch heartbeat.md from Moltbook (context only)
       const heartbeatContent = await this.fetchHeartbeat();
 
-      // 2. Fetch feeds from both platforms in parallel
+      // 3. Fetch feeds from both platforms in parallel
       const [moltbookFeed, clawstrFeed] = await Promise.all([
         moltbookApi.getFeed('new', 10),
         this.fetchClawstrFeed()
       ]);
 
-      // 3. Use Claude to decide on engagement for BOTH platforms in one call
+      // 4. Use Claude to decide on engagement for BOTH platforms in one call
       const engagementPlan = await this.planDualPlatformEngagement(
         heartbeatContent,
         moltbookFeed,
         clawstrFeed
       );
 
-      // 4. Execute engagements on both platforms
+      // 5. Execute engagements on both platforms
       await Promise.all([
         this.executeMoltbookEngagement(engagementPlan.moltbook || []),
         this.executeClawstrEngagement(engagementPlan.clawstr || [])
       ]);
 
-      // 4.5. Process discoveries (verifiable claims and explicit requests)
+      // 5.5. Process discoveries (verifiable claims and explicit requests)
       let discoveryCount = 0;
       let autoApprovedCount = 0;
       if (engagementPlan.discoveries && engagementPlan.discoveries.length > 0) {
@@ -123,21 +129,23 @@ class HeartbeatSystem {
         console.log(`[Heartbeat] Processed ${discoveryCount} new discoveries/requests (${autoApprovedCount} auto-approved)`);
       }
 
-      // 5. Update state
+      // 6. Update state
       await stateManager.updateHeartbeat('dual_platform_check', {
         moltbookPosts: moltbookFeed.length,
         clawstrPosts: clawstrFeed.length,
         moltbookEngagements: engagementPlan.moltbook?.length || 0,
         clawstrEngagements: engagementPlan.clawstr?.length || 0,
+        moltbookReplies: replyResult.repliedCount,
         discoveries: discoveryCount
       });
 
-      // 6. Notify admin
+      // 7. Notify admin
       await this.notifyAdmin('✅ Dual-platform heartbeat complete', {
         moltbookPosts: moltbookFeed.length,
         clawstrPosts: clawstrFeed.length,
         moltbookEngagements: engagementPlan.moltbook?.length || 0,
         clawstrEngagements: engagementPlan.clawstr?.length || 0,
+        moltbookReplies: replyResult.repliedCount,
         discoveries: discoveryCount
       });
 
@@ -163,6 +171,115 @@ class HeartbeatSystem {
       console.log('[Heartbeat] Could not fetch heartbeat.md:', error.message);
       return null;
     }
+  }
+
+  /**
+   * Respond to replies on Kinetix's own Moltbook posts/comments — the
+   * highest-priority action per Moltbook's heartbeat.md, and something the
+   * bot never did before (no code path called /home). Bounded to the 5 most
+   * recent threads with activity per run so a backlog can't dominate a cycle.
+   * @returns {Promise<{repliedCount: number}>}
+   */
+  async respondToMoltbookReplies() {
+    let repliedCount = 0;
+    try {
+      const home = await moltbookApi.getHome();
+      const activity = home?.activity_on_your_posts || [];
+      if (activity.length === 0) return { repliedCount };
+
+      console.log(`[Heartbeat] Moltbook: ${activity.length} post(s) with new activity`);
+
+      for (const item of activity.slice(0, 5)) {
+        try {
+          const engagementKey = `${item.post_id}:${item.latest_at}`;
+          const alreadyReplied = await stateManager.hasEngaged('reply', engagementKey);
+          if (alreadyReplied) continue;
+
+          const comments = await moltbookApi.getComments(item.post_id, 'new', 10);
+          const newComments = (comments || [])
+            .filter(c => (c.author?.name || '').toLowerCase() !== 'kinetix')
+            .slice(-3);
+
+          if (newComments.length === 0) {
+            await moltbookApi.markNotificationsRead(item.post_id);
+            continue;
+          }
+
+          const replyText = await this.draftReply(item, newComments);
+          if (!replyText) continue;
+
+          const postingMode = this.config.posting_mode;
+          if (postingMode === 'autonomous') {
+            const canProceed = await this.ensureCommentSlot();
+            if (!canProceed) {
+              console.log(`[Heartbeat] Moltbook: Skipping reply on ${item.post_id}, comment floor unavailable`);
+              continue;
+            }
+            const targetCommentId = newComments[newComments.length - 1].id;
+            await moltbookApi.addComment(item.post_id, replyText, targetCommentId);
+            await stateManager.recordEngagement('reply', engagementKey);
+            repliedCount++;
+            console.log(`[Heartbeat] Moltbook: Replied on own post ${item.post_id}`);
+          } else {
+            await this.queueCommentForApproval({ postId: item.post_id, comment: replyText, action: 'reply' });
+            await stateManager.recordEngagement('reply', engagementKey);
+            console.log(`[Heartbeat] Moltbook: Queued reply on ${item.post_id} for approval`);
+          }
+
+          await moltbookApi.markNotificationsRead(item.post_id);
+        } catch (error) {
+          console.error(`[Heartbeat] Reply error for post ${item.post_id}:`, error.message);
+        }
+      }
+    } catch (error) {
+      console.error('[Heartbeat] Error fetching /home:', error.message);
+    }
+    return { repliedCount };
+  }
+
+  /**
+   * Draft a reply to new comments on one of Kinetix's own posts, grounded in
+   * the actual comment content rather than a template.
+   * @param {Object} item - An activity_on_your_posts entry from GET /home
+   * @param {Array} comments - Recent comments on that post
+   * @returns {Promise<string|null>}
+   */
+  async draftReply(item, comments) {
+    try {
+      const commentsText = comments
+        .map(c => `- ${c.author?.name || 'unknown'}: ${(c.content || '').slice(0, 300)}`)
+        .join('\n');
+
+      const response = await this.anthropic.messages.create({
+        model: this.config.model,
+        max_tokens: 300,
+        system: 'You are Kinetix, verification infrastructure for AI agents. Someone replied on your Moltbook post. Write a brief, substantive reply (2-4 sentences) that continues the conversation genuinely. Do not restate your own bio. Return only the reply text, nothing else.',
+        messages: [{
+          role: 'user',
+          content: `Your post: "${item.post_title}"\n\nNew replies:\n${commentsText}\n\nWrite your reply.`
+        }]
+      });
+      const text = response.content[0].text.trim();
+      return text || null;
+    } catch (error) {
+      console.error('[Heartbeat] draftReply error:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Wait out Moltbook's 20s-between-comments floor if needed, so multiple
+   * comments in one heartbeat cycle don't trip the platform's own rate
+   * limiter. Returns false (skip, don't wait) if the daily cap is the
+   * blocker rather than the short floor — that's hours away, not seconds.
+   * @returns {Promise<boolean>}
+   */
+  async ensureCommentSlot() {
+    const check = await stateManager.checkMoltbookCommentAllowed();
+    if (check.allowed) return true;
+    if (check.reason === 'daily_max') return false;
+    await new Promise(resolve => setTimeout(resolve, check.waitMs + 250));
+    return true;
   }
 
   /**
@@ -195,16 +312,15 @@ class HeartbeatSystem {
   async planDualPlatformEngagement(heartbeatContent, moltbookFeed, clawstrFeed) {
     const systemPrompt = `You are Kinetix's dual-platform engagement planner. Analyze posts from both Moltbook and Clawstr (Nostr) and decide which ones Kinetix should engage with.
 
-Kinetix's primary identity: Verification infrastructure for agents
-Secondary identity: Health specialist (as verified domain credential)
+Kinetix's identity: Verification infrastructure for agents. Musculoskeletal health is a secondary, rarely-invoked credential ("I diagnose reputation the way I diagnose patients") — not a service Kinetix actively offers.
 
 Kinetix's personality traits: ${Object.keys(this.personality.core_traits).join(', ')}
-Focus areas: musculoskeletal health, biomechanics, movement, AI agents, human physiology, agent autonomy
+Focus areas: agent coordination, reputation systems, verification, AI agent autonomy
 
 Engagement priorities:
-1. Agent coordination, reputation systems, verification discussions (HIGH - 70%)
-2. Health/movement topics where Kinetix can demonstrate domain expertise (MEDIUM - 30%)
-3. Community building in /agentkinetics and /humanbiology submolts (HIGH)
+1. Agent coordination, reputation systems, verification discussions (HIGH)
+2. Community building in agent-focused submolts, e.g. /aiagents (HIGH)
+3. A health/movement angle only when it genuinely illustrates the diagnostic-rigor point (RARE)
 
 Voice: "I verify commitments the way I diagnose patients — evidence-based, objective, rigorous."
 
@@ -303,51 +419,6 @@ ${heartbeatContent ? `\nHeartbeat context:\n${heartbeatContent.slice(0, 500)}` :
   }
 
   /**
-   * LEGACY: Use Claude to analyze posts and plan engagement (Moltbook only)
-   * @deprecated Use planDualPlatformEngagement instead
-   */
-  async planEngagement(heartbeatContent, feedPosts) {
-    const systemPrompt = `You are Kinetix's engagement planner. Analyze these Moltbook posts and decide which ones Kinetix should engage with.
-
-Kinetix's personality traits: ${Object.keys(this.personality.core_traits).join(', ')}
-Focus areas: musculoskeletal health, biomechanics, movement, AI agents, human physiology
-
-For each post, decide:
-1. Should Kinetix upvote? (interesting, health-related, agent-community relevant)
-2. Should Kinetix comment? (can add value with health/biomechanics expertise)
-3. What should the comment say? (stay in character, be helpful)
-
-Return JSON: { "engagements": [{ "postId": "...", "action": "upvote|comment", "comment": "..." }] }
-Limit to 3 most relevant engagements. Prioritize quality over quantity.`;
-
-    const userMessage = `Posts to analyze:\n${JSON.stringify(feedPosts.slice(0, 5).map(p => ({
-      id: p.id,
-      title: p.title,
-      content: p.content?.slice(0, 300),
-      author: p.author,
-      submolt: p.submolt
-    })), null, 2)}
-
-${heartbeatContent ? `\nHeartbeat context:\n${heartbeatContent.slice(0, 500)}` : ''}`;
-
-    try {
-      const response = await this.anthropic.messages.create({
-        model: this.config.model,
-        max_tokens: 1000,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }]
-      });
-
-      const text = response.content[0].text;
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      return jsonMatch ? JSON.parse(jsonMatch[0]) : { engagements: [] };
-    } catch (error) {
-      console.error('[Heartbeat] Claude planning error:', error.message);
-      return { engagements: [] };
-    }
-  }
-
-  /**
    * Execute Moltbook engagement plan
    * @param {Array} engagements - Moltbook engagements from Claude
    */
@@ -374,7 +445,14 @@ ${heartbeatContent ? `\nHeartbeat context:\n${heartbeatContent.slice(0, 500)}` :
 
         } else if (engagement.action === 'comment') {
           if (postingMode === 'autonomous') {
-            // Auto-comment
+            // Auto-comment — wait out the 20s floor if a previous comment
+            // in this same cycle (or respondToMoltbookReplies above) just
+            // used it, rather than tripping Moltbook's own rate limiter.
+            const canProceed = await this.ensureCommentSlot();
+            if (!canProceed) {
+              console.log(`[Heartbeat] Moltbook: Skipping comment on ${engagement.postId}, daily comment cap reached`);
+              continue;
+            }
             await moltbookApi.addComment(engagement.postId, engagement.comment);
             await stateManager.recordEngagement('comment', engagement.postId);
             console.log(`[Heartbeat] Moltbook: Commented on ${engagement.postId}`);
@@ -438,49 +516,6 @@ ${heartbeatContent ? `\nHeartbeat context:\n${heartbeatContent.slice(0, 500)}` :
         }
       } catch (error) {
         console.error(`[Heartbeat] Clawstr engagement error for ${engagement.eventId?.slice(0, 16)}:`, error.message);
-      }
-    }
-  }
-
-  /**
-   * LEGACY: Execute engagement plan (Moltbook only)
-   * @deprecated Use executeMoltbookEngagement instead
-   */
-  async executeEngagement(plan) {
-    const postingMode = this.config.posting_mode;
-
-    for (const engagement of plan.engagements || []) {
-      try {
-        // Check if already engaged
-        const alreadyEngaged = await stateManager.hasEngaged(
-          engagement.action,
-          engagement.postId
-        );
-        if (alreadyEngaged) {
-          console.log(`[Heartbeat] Already engaged with ${engagement.postId}, skipping`);
-          continue;
-        }
-
-        if (engagement.action === 'upvote') {
-          // Upvotes are always safe to do automatically
-          await moltbookApi.upvote(engagement.postId);
-          await stateManager.recordEngagement('upvote', engagement.postId);
-          console.log(`[Heartbeat] Upvoted ${engagement.postId}`);
-
-        } else if (engagement.action === 'comment') {
-          if (postingMode === 'autonomous') {
-            // Auto-comment
-            await moltbookApi.addComment(engagement.postId, engagement.comment);
-            await stateManager.recordEngagement('comment', engagement.postId);
-            console.log(`[Heartbeat] Commented on ${engagement.postId}`);
-          } else {
-            // Queue for approval
-            await this.queueCommentForApproval(engagement);
-            console.log(`[Heartbeat] Queued comment on ${engagement.postId} for approval`);
-          }
-        }
-      } catch (error) {
-        console.error(`[Heartbeat] Engagement error for ${engagement.postId}:`, error.message);
       }
     }
   }
