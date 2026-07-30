@@ -1,4 +1,5 @@
 const axios = require('axios');
+const stateManager = require('./state-manager');
 
 const API_BASE = 'https://www.moltbook.com/api/v1';
 
@@ -46,14 +47,29 @@ function _summarize(data, maxLen = 300) {
 let _lastSuspensionNotifiedAt = 0;
 const SUSPENSION_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 
-// Response interceptor for success responses that embed a challenge
+// Response interceptor for success responses that embed a challenge.
+//
+// Confirmed live (Jul 2026): POST /posts returns 2xx with the created
+// resource fields at the top level AND a sibling `verification` object:
+// { id, title, ..., verification: { verification_code, challenge_text,
+// expires_at, instructions } }. Not a top-level `data.challenge`/
+// `data.challenge_text` as originally assumed — that shape never matched,
+// which is why every post since Feb 2026 sat at verification_status:
+// "pending" with the challenge silently unanswered.
 client.interceptors.response.use(
   response => {
     const { data } = response;
-    if (data && (data.challenge || data.challenge_text || data.verification_required)) {
+    const nested = data?.verification;
+    const isEmbeddedChallenge =
+      data && (data.challenge || data.challenge_text || data.verification_required || nested?.challenge_text);
+    if (isEmbeddedChallenge) {
       console.error('[Moltbook API] ⚠️ Challenge embedded in 2xx response:', _summarize(data));
-      const err = new Error(`Challenge required: ${data.challenge || data.challenge_text || 'verification_required'}`);
+      const err = new Error(`Challenge required: ${data.challenge || data.challenge_text || nested?.challenge_text || 'verification_required'}`);
       err.isChallenge = true;
+      // Keep the FULL original resource (id, title, content, ...), not just
+      // the nested verification block — the caller needs the real id to
+      // return once the challenge is solved, since POST /verify's own
+      // response only echoes back a content_id, not the full resource.
       err.challengeData = data;
       throw err;
     }
@@ -62,6 +78,16 @@ client.interceptors.response.use(
   error => {
     if (error.response) {
       const { status, data } = error.response;
+
+      // Transparently retry once on 429, honoring the server's Retry-After.
+      // Capped so a slow/misbehaving retry-after can't hang a caller.
+      if (status === 429 && !error.config.__moltbookRetried) {
+        const retryAfterSec = Number(error.response.headers['retry-after'] || data?.retry_after_seconds || data?.retry_after || 5);
+        const waitMs = Math.min(Number.isFinite(retryAfterSec) ? retryAfterSec : 5, 60) * 1000;
+        error.config.__moltbookRetried = true;
+        console.warn(`[Moltbook API] 429 rate limited, retrying in ${waitMs}ms`);
+        return new Promise(resolve => setTimeout(resolve, waitMs)).then(() => client(error.config));
+      }
 
       console.error(`[Moltbook API] Error Response: status=${status} data=${_summarize(data)}`);
 
@@ -137,63 +163,49 @@ function handleError(error) {
 
 // ===== Posts =====
 
-// Submolt ID cache to reduce API calls
-const submoltCache = new Map();
-
 /**
- * Get submolt ID by name
- * @param {string} submoltName - Submolt name (e.g., "humanbiology", "agentkinetics")
- * @returns {Promise<string>} Submolt UUID
- */
-async function getSubmoltId(submoltName) {
-  // Check cache first
-  if (submoltCache.has(submoltName)) {
-    return submoltCache.get(submoltName);
-  }
-
-  try {
-    const response = await client.get(`/submolts/${submoltName}`);
-    const id = response.data.id || response.data.submolt?.id;
-
-    // Cache the result
-    submoltCache.set(submoltName, id);
-
-    return id;
-  } catch (error) {
-    console.warn(`[Moltbook API] Submolt ${submoltName} not found, using default`);
-    const defaultId = '29beb7ee-ca7d-4290-9c2f-09926264866f'; // Default general submolt
-
-    // Cache default too
-    submoltCache.set(submoltName, defaultId);
-
-    return defaultId;
-  }
-}
-
-/**
- * Create a new post in a submolt
- * @param {string} submolt - Submolt name (without 'm/' prefix) or UUID
+ * Create a new post in a submolt. Enforces Moltbook's documented 1-post/30min
+ * floor locally (persisted, survives restarts) so a caller never trips the
+ * platform's own rate limiter into a suspension.
+ * @param {string} submolt - Submolt name (without 'm/' prefix)
  * @param {string} title - Post title
  * @param {string} content - Post content/body
  * @returns {Promise<Object>} Created post object
  */
 async function createPost(submolt, title, content) {
-  try {
-    // API now expects submolt_name (string), not submolt_id (UUID)
-    const submolt_name = submolt;
+  const rateCheck = await stateManager.checkMoltbookPostAllowed();
+  if (!rateCheck.allowed) {
+    const err = new Error(`Moltbook post floor not yet elapsed — wait ${Math.ceil(rateCheck.waitMs / 1000)}s`);
+    err.isLocalRateLimit = true;
+    err.waitMs = rateCheck.waitMs;
+    throw err;
+  }
 
-    const response = await client.post('/posts', {
-      submolt_name,
-      title,
-      content
-    });
-    return response.data;
+  try {
+    const response = await client.post('/posts', { submolt_name: submolt, title, content });
+    await stateManager.recordMoltbookPost();
+    const post = response.data.post || response.data;
+    console.log(`[Moltbook API] Post created: ${post.id} in m/${submolt}`);
+    return post;
   } catch (error) {
     if (error.isChallenge) {
+      // The POST above already created the post server-side (it returned a
+      // 2xx that embedded the challenge) — it just sits at
+      // verification_status: "pending" until the challenge is answered.
+      // Re-issuing the request here would create a duplicate post, so we
+      // only solve the challenge and return whatever resource the platform
+      // gave us, never re-POST the content.
       console.log('[Moltbook API] Challenge received on createPost - auto-solving...');
       const { solveChallengeAndSubmit } = require('./challenge-solver');
       await solveChallengeAndSubmit(error.challengeData);
-      return; // content is live after challenge answer accepted
+      await stateManager.recordMoltbookPost();
+      // error.challengeData is the full original post (id/title/content/...)
+      // with a now-resolved `.verification` block — /verify's own response
+      // only echoes back a content_id, not the full resource, so this is the
+      // reliable source for the id callers need.
+      const post = error.challengeData;
+      console.log(`[Moltbook API] Challenge solved - post live: ${post.id}`);
+      return post;
     }
     handleError(error);
   }
@@ -230,26 +242,60 @@ async function deletePost(postId) {
 // ===== Comments =====
 
 /**
- * Add a comment to a post
+ * Get comments on a post.
+ * @param {string} postId
+ * @param {string} sort - 'new' | 'best' | 'old'
+ * @param {number} limit
+ * @returns {Promise<Array>} Comments
+ */
+async function getComments(postId, sort = 'new', limit = 20) {
+  try {
+    const response = await client.get(`/posts/${postId}/comments`, { params: { sort, limit } });
+    const data = response.data;
+    return Array.isArray(data) ? data : (data.comments || []);
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+/**
+ * Add a comment to a post. Enforces Moltbook's documented 1-comment/20s and
+ * 50-comments/day floors locally (persisted, survives restarts).
  * @param {string} postId - Post ID
  * @param {string} content - Comment content
  * @param {string|null} parentId - Parent comment ID for replies
  * @returns {Promise<Object>} Created comment object
  */
 async function addComment(postId, content, parentId = null) {
+  const rateCheck = await stateManager.checkMoltbookCommentAllowed();
+  if (!rateCheck.allowed) {
+    const err = new Error(`Moltbook comment floor not yet elapsed (${rateCheck.reason}) — wait ${Math.ceil(rateCheck.waitMs / 1000)}s`);
+    err.isLocalRateLimit = true;
+    err.waitMs = rateCheck.waitMs;
+    throw err;
+  }
+
   try {
     const payload = { content };
     if (parentId) {
       payload.parent_id = parentId;
     }
     const response = await client.post(`/posts/${postId}/comments`, payload);
-    return response.data;
+    await stateManager.recordMoltbookComment();
+    const comment = response.data.comment || response.data;
+    console.log(`[Moltbook API] Comment created: ${comment.id} on post ${postId}`);
+    return comment;
   } catch (error) {
     if (error.isChallenge) {
+      // Same reasoning as createPost: the comment already exists server-side
+      // pending the challenge answer, so don't re-POST it.
       console.log('[Moltbook API] Challenge received on addComment - auto-solving...');
       const { solveChallengeAndSubmit } = require('./challenge-solver');
       await solveChallengeAndSubmit(error.challengeData);
-      return; // content is live after challenge answer accepted
+      await stateManager.recordMoltbookComment();
+      const comment = error.challengeData;
+      console.log(`[Moltbook API] Challenge solved - comment live: ${comment.id}`);
+      return comment;
     }
     handleError(error);
   }
@@ -438,6 +484,22 @@ async function getProfile() {
 }
 
 /**
+ * Update the authenticated agent's own profile (e.g. description/bio).
+ * Confirmed live via a Phase-0 probe: PATCH /agents/me exists (returns 400
+ * "No valid fields to update" on an empty body, not 404).
+ * @param {Object} fields - e.g. { description: '...' }
+ * @returns {Promise<Object>} Updated agent object
+ */
+async function updateProfile(fields) {
+  try {
+    const response = await client.patch('/agents/me', fields);
+    return response.data.agent || response.data;
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+/**
  * Set up owner email for account management
  * @param {string} email - Owner's email address
  * @returns {Promise<Object>} Setup confirmation
@@ -481,15 +543,46 @@ async function unfollowAgent(name) {
   }
 }
 
-// ===== Status =====
+// ===== Home & Notifications =====
 
 /**
- * Get API status and rate limit info
- * @returns {Promise<Object>} Status object
+ * GET /home — the dashboard endpoint Moltbook's own heartbeat.md calls
+ * first: account status, activity on your posts, DMs, announcements,
+ * followed agents' posts. There was previously no code path that ever
+ * called this, so Kinetix never surfaced replies to its own posts/comments.
+ * @returns {Promise<Object>} Home dashboard object
  */
-async function getStatus() {
+async function getHome() {
   try {
-    const response = await client.get('/status');
+    const response = await client.get('/home');
+    return response.data;
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+/**
+ * List notifications (comment replies, mentions, etc).
+ * @param {number} limit
+ * @returns {Promise<Array>} Notifications
+ */
+async function getNotifications(limit = 20) {
+  try {
+    const response = await client.get('/notifications', { params: { limit } });
+    return response.data.notifications || [];
+  } catch (error) {
+    handleError(error);
+  }
+}
+
+/**
+ * Mark all notifications for a post as read.
+ * @param {string} postId
+ * @returns {Promise<Object>}
+ */
+async function markNotificationsRead(postId) {
+  try {
+    const response = await client.post(`/notifications/read-by-post/${postId}`);
     return response.data;
   } catch (error) {
     handleError(error);
@@ -501,9 +594,9 @@ module.exports = {
   createPost,
   getPost,
   deletePost,
-  getSubmoltId,
 
   // Comments
+  getComments,
   addComment,
 
   // Voting
@@ -524,12 +617,15 @@ module.exports = {
 
   // Profile & Following
   getProfile,
+  updateProfile,
   setupOwnerEmail,
   followAgent,
   unfollowAgent,
 
-  // Status
-  getStatus,
+  // Home & Notifications
+  getHome,
+  getNotifications,
+  markNotificationsRead,
 
   // Admin notifier registration
   setAdminNotifier

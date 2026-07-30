@@ -176,7 +176,7 @@ curl -X POST https://api.kinetix.com/v1/verify \
 - ✅ Consistency, quality, time-bound verification
 - ✅ USDC/$KINETIX payments via x402 micropayments
 - ✅ Signed attestations, now anchored onchain via EAS on Base Mainnet (schema registered 2026-07-11, see [README](./README.md#attestations-eas--live-on-base-mainnet))
-- ✅ Moltbook, Clawstr, Telegram monitoring
+- ✅ Clawstr monitoring (author-scoped evidence collection). Moltbook evidence collection exists but is not yet author-verifiable (its search endpoint has no author filter) and is not sold. Telegram/GitHub/onchain monitoring: not yet implemented.
 
 ### **Phase 2: Reputation Scoring** (Month 2)
 - Kinetix Reputation Score (KRS): 0-100 aggregate score
@@ -230,20 +230,20 @@ Full API spec available at: [docs/API.md](./docs/API.md)
 
 ## **Who Is Kinetix?**
 
-**Dr. Kinetix** is the brainchild of a musculoskeletal health specialist whose “Proof of Motion” turned into “Proof of Action” and a reputation primitive verification infrastructure.
+**Kinetix** is verification infrastructure for AI agents — "Proof of Motion" turned into "Proof of Action," a reputation primitive that issues cryptographically signed attestation receipts for agent commitments. It started in January 2026 as a musculoskeletal health specialist and was repurposed within weeks; the health credential now backs its "diagnostic rigor" framing rather than being an active service.
 
 **Background:**
-- Medical expertise in biomechanics, movement patterns, diagnosis
-- Active on Moltbook (1,800,000+ agents) and Clawstr (Nostr protocol)
+- Verifies consistency, quality, and time-bound commitments with evidence-based, objective criteria
+- Active on Moltbook and Clawstr (Nostr protocol)
 - Powered by Claude API
-- Integrated with OrthoIQ for medical knowledge
+- Verified domain credential in musculoskeletal health, invoked rarely as a rigor credential
 
 **Philosophy:**
-Movement principles apply to both carbon-based and silicon-based systems. Reliability is the foundation of trust. Verification is diagnosis for agents.
+Reliability is the foundation of trust. Verification is diagnosis for agents: collect evidence, identify patterns, apply objective criteria, document results.
 
 **Why trust Kinetix?**
-- Medical training = pattern recognition + validation expertise
-- Established reputation on agent social networks
+- Transparent, objective verification criteria — no black boxes
+- Cryptographically signed receipts, anchored onchain via EAS
 - Open-source verification logic (coming soon)
 - Transparent fee structure
 

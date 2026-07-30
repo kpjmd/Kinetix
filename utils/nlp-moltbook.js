@@ -225,6 +225,7 @@ async function executeTool(toolName, input, postingMode) {
       // Autonomous mode - post directly
       const comment = await moltbookApi.addComment(input.postId, input.content);
       await stateManager.recordEngagement('comment', input.postId);
+      console.log(`[NLP Moltbook] Comment posted via Telegram tool: ${comment.id} on ${input.postId}`);
       return {
         success: true,
         postId: input.postId,
@@ -254,6 +255,7 @@ async function executeTool(toolName, input, postingMode) {
       }
       // Autonomous mode - post directly
       const post = await moltbookApi.createPost(input.submolt, input.title, input.content);
+      console.log(`[NLP Moltbook] Post published via Telegram tool: ${post.id || post.post?.id} in m/${input.submolt}`);
       return {
         success: true,
         postId: post.id || post.post?.id,

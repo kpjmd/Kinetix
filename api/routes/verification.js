@@ -5,7 +5,7 @@ const { Router } = require('express');
 const verificationTypes = require('../../skills/verification/types.json');
 const pricing = require('../../skills/verification/pricing.json');
 const tokenomics = require('../../config/tokenomics.json');
-const verificationRules = require('../../config/verification-rules.json');
+const { SUPPORTED_PLATFORMS } = require('../../utils/monitoring-target');
 
 /**
  * Create verification routes
@@ -34,11 +34,11 @@ function createVerificationRoutes(services) {
         criteria_schema: getCriteriaSchema(vt.id)
       })),
       pricing: {
-        usdc: pricing.pricing.usdc,
-        kinetix: pricing.pricing.kinetix,
+        tiers: pricing.pricing.tiers,
+        kinetix_discount: pricing.pricing.kinetix_discount,
         difficulty_multipliers: pricing.difficulty_multipliers
       },
-      supported_platforms: Object.keys(verificationRules.evidence_requirements),
+      supported_platforms: SUPPORTED_PLATFORMS,
       token: tokenomics.token,
       issuer: {
         pubkey: attestationService.signingWallet?.address || 'not_initialized',

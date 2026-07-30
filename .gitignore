@@ -34,4 +34,5 @@ data/erc8004/reputation-submissions/
 data/erc8004/lookup-cache-*.json
 data/engagement-history.json
 data/social-state.json
+data/moltbook-rate-state.json
 data/x402-payments/
