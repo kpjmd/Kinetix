@@ -3,6 +3,7 @@ const { paymentMiddleware, x402ResourceServer } = require('@x402/express');
 const { HTTPFacilitatorClient } = require('@x402/core/server');
 const { createFacilitatorConfig } = require('@coinbase/x402');
 const { registerExactEvmScheme } = require('@x402/evm/exact/server');
+const { OKXFacilitatorClient } = require('@okxweb3/x402-core');
 const {
   bazaarResourceServerExtension,
   declareDiscoveryExtension
@@ -45,6 +46,47 @@ const facilitatorConfig = isMainnet
   ? createFacilitatorConfig(process.env.CDP_API_KEY_ID, process.env.CDP_API_KEY_SECRET)
   : { url: process.env.X402_FACILITATOR_URL || 'https://www.x402.org/facilitator' };
 
+// X Layer (OKX AI's marketplace network) is a second, additive accepts[]
+// option alongside Base — required so the 402 challenge on this endpoint
+// satisfies OKX AI's ASP review, which only settles on eip155:196. Gated on
+// credential presence so local/dev and any deploy without OKX Developer
+// Portal keys keep today's Base-only behavior unchanged.
+const xLayerConfig = pricingConfig.x_layer;
+const X_LAYER_NETWORK = `eip155:${xLayerConfig.chain_id}`;
+const X_LAYER_ASSET = xLayerConfig.assets[xLayerConfig.default_asset];
+const X_LAYER_PAY_TO = process.env.X_LAYER_PAY_TO || '0x68fb2f902ecdff17f715ffa487a9eb94d2460f5e';
+
+const hasOkxCreds = !!(process.env.OKX_API_KEY && process.env.OKX_SECRET_KEY && process.env.OKX_PASSPHRASE);
+const okxFacilitatorClient = hasOkxCreds
+  ? new OKXFacilitatorClient({
+      apiKey: process.env.OKX_API_KEY,
+      secretKey: process.env.OKX_SECRET_KEY,
+      passphrase: process.env.OKX_PASSPHRASE,
+    })
+  : null;
+
+// x402 v2 `price` accepts either a plain Money string (`"$1.00"`, resolved via
+// the scheme's default-asset table) or an explicit AssetAmount. @x402/evm's
+// default-asset table has no eip155:196 entry, so the X Layer leg must always
+// use the explicit form; the Base leg keeps using the plain string unchanged.
+function buildAccepts(priceUsdc, payTo) {
+  const accepts = [{ scheme: 'exact', price: `$${priceUsdc}`, network: x402NetworkName, payTo }];
+  if (okxFacilitatorClient) {
+    accepts.unshift({
+      scheme: 'exact',
+      network: X_LAYER_NETWORK,
+      price: {
+        amount: String(Math.round(parseFloat(priceUsdc) * 10 ** X_LAYER_ASSET.decimals)),
+        asset: X_LAYER_ASSET.address,
+        extra: { name: X_LAYER_ASSET.name, version: X_LAYER_ASSET.version }
+      },
+      payTo: X_LAYER_PAY_TO,
+      maxTimeoutSeconds: 300
+    });
+  }
+  return accepts;
+}
+
 // Parse JSON bodies
 app.use(express.json());
 
@@ -76,6 +118,7 @@ app.get('/health', (req, res) => {
     network: NETWORK_ID,
     wallet: KINETIX_WALLET,
     x402_network: x402NetworkName,
+    x402_networks: okxFacilitatorClient ? [X_LAYER_NETWORK, x402NetworkName] : [x402NetworkName],
     timestamp: new Date().toISOString()
   });
 });
@@ -116,12 +159,22 @@ app.get('/api/x402/verify/:id/status', async (req, res, next) => {
   }
 });
 
-// Initialize x402 resource server with CDP-authenticated facilitator
+// Initialize x402 resource server. facilitatorClients is an array so the
+// OKX facilitator (X Layer settlement) can sit alongside the CDP facilitator
+// (Base settlement) on the same resourceServer — x402ResourceServer dispatches
+// each accepts[] entry to whichever registered facilitator supports its network.
 const facilitatorClient = new HTTPFacilitatorClient(facilitatorConfig);
-const resourceServer = new x402ResourceServer(facilitatorClient);
+const facilitatorClients = [facilitatorClient];
+if (okxFacilitatorClient) facilitatorClients.push(okxFacilitatorClient);
+const resourceServer = new x402ResourceServer(facilitatorClients);
 
-// Register EVM scheme for the network
-registerExactEvmScheme(resourceServer, x402NetworkName);
+// Register EVM scheme for each supported network. (The previous call passed
+// a bare string here, which registerExactEvmScheme's real `{networks: [...]}`
+// signature silently falls through to an `eip155:*` wildcard registration —
+// harmless, but the explicit form below is what the signature actually expects.)
+registerExactEvmScheme(resourceServer, {
+  networks: okxFacilitatorClient ? [x402NetworkName, X_LAYER_NETWORK] : [x402NetworkName]
+});
 
 // Register Bazaar extension for discovery
 resourceServer.registerExtension(bazaarResourceServerExtension);
@@ -280,36 +333,21 @@ const premiumDiscovery = declareDiscoveryExtension({
 // Define protected routes with pricing
 const protectedRoutes = {
   'POST /api/x402/verify/basic': {
-    accepts: {
-      scheme: 'exact',
-      price: `$${pricingConfig.tiers.basic.price_usdc}`,
-      network: x402NetworkName,
-      payTo: KINETIX_WALLET,
-    },
+    accepts: buildAccepts(pricingConfig.tiers.basic.price_usdc, KINETIX_WALLET),
     description: pricingConfig.tiers.basic.description,
     extensions: {
       ...basicDiscovery
     }
   },
   'POST /api/x402/verify/advanced': {
-    accepts: {
-      scheme: 'exact',
-      price: `$${pricingConfig.tiers.advanced.price_usdc}`,
-      network: x402NetworkName,
-      payTo: KINETIX_WALLET,
-    },
+    accepts: buildAccepts(pricingConfig.tiers.advanced.price_usdc, KINETIX_WALLET),
     description: pricingConfig.tiers.advanced.description,
     extensions: {
       ...advancedDiscovery
     }
   },
   'POST /api/x402/verify/premium': {
-    accepts: {
-      scheme: 'exact',
-      price: `$${pricingConfig.tiers.premium.price_usdc}`,
-      network: x402NetworkName,
-      payTo: KINETIX_WALLET,
-    },
+    accepts: buildAccepts(pricingConfig.tiers.premium.price_usdc, KINETIX_WALLET),
     description: pricingConfig.tiers.premium.description,
     extensions: {
       ...premiumDiscovery
@@ -335,6 +373,9 @@ if (PRODUCTION) {
   }
   if (!process.env.CDP_API_KEY_ID || !process.env.CDP_API_KEY_SECRET) {
     fatal.push('CDP_API_KEY_ID/CDP_API_KEY_SECRET are required for the mainnet facilitator');
+  }
+  if (!hasOkxCreds) {
+    fatal.push('OKX_API_KEY/OKX_SECRET_KEY/OKX_PASSPHRASE are required — this URL is registered with OKX AI and its 402 challenge must declare eip155:196');
   }
   if (!/^0x[a-fA-F0-9]{40}$/.test(KINETIX_WALLET)) {
     fatal.push(`CDP_WALLET_ADDRESS is not a valid address: ${KINETIX_WALLET}`);
@@ -363,7 +404,7 @@ if (!TEST_MODE) {
           category: 'verification',
           tags: ['identity', 'kyc', 'reputation', 'blockchain', 'erc-8004'],
           erc8004_token_id: ERC8004_TOKEN_ID,
-          supportedNetworks: [x402NetworkName],
+          supportedNetworks: okxFacilitatorClient ? [X_LAYER_NETWORK, x402NetworkName] : [x402NetworkName],
           supportedTypes: ['consistency', 'quality', 'time_bound']
         }
       },
@@ -407,6 +448,10 @@ async function initializeServices() {
     try {
       await resourceServer.initialize();
       console.log('✓ Resource server initialized with facilitator');
+      console.log(`  exact/${x402NetworkName} supported: ${!!resourceServer.getSupportedKind(2, x402NetworkName, 'exact')}`);
+      if (okxFacilitatorClient) {
+        console.log(`  exact/${X_LAYER_NETWORK} supported: ${!!resourceServer.getSupportedKind(2, X_LAYER_NETWORK, 'exact')}`);
+      }
     } catch (error) {
       console.error('❌ Facilitator initialization failed:');
       console.error(`  ${error.message}`);
