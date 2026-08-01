@@ -12,8 +12,16 @@ Kinetix does not adjudicate disputes about its own verdicts.
 
 | | Endpoint | Price |
 |---|---|---|
-| Paid | `POST /api/x402/verify/premium` | 1.00 USDC (x402, Base mainnet) |
+| Paid | `POST /api/x402/verify/premium` | 1.00 USDC (x402, Base mainnet) **or** 1.00 USD₮0 (x402, X Layer) |
 | Free | `GET /api/v1/attestation/:receipt_id` | — |
+
+The 402 challenge on this endpoint declares **two** `accepts[]` options: X
+Layer (`eip155:196`, settled via OKX's own facilitator) first, Base mainnet
+(`eip155:8453`, settled via CDP) second. X Layer was added after OKX AI
+rejected the first submission — its facilitator only settles on X Layer, so
+that network must be present in the challenge. Base mainnet stays for
+existing direct integrations; a caller picks whichever `accepts[]` entry it
+can pay.
 
 The premium tier already carried the intended $1.00 price and the full feature
 set (`all_scoring`, `ipfs_upload`, `erc8004_submission`), so no pricing changes
@@ -48,7 +56,8 @@ Boot-critical — the server exits or misbehaves without these:
 | `NETWORK_ID` | `base-mainnet` | Resolves chain 8453 → CDP facilitator |
 | `DEFAULT_NETWORK` | `base_mainnet` | Must agree with `NETWORK_ID`; `utils/network.js` throws on a split |
 | `CDP_API_KEY_ID` / `CDP_API_KEY_SECRET` | from CDP | Facilitator init failure exits the process |
-| `CDP_WALLET_ADDRESS` | `0x8c61756f693A321777562433E19B2AabF71f5519` | This is `payTo` |
+| `CDP_WALLET_ADDRESS` | `0x8c61756f693A321777562433E19B2AabF71f5519` | This is `payTo` for the Base leg |
+| `OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` | from the [OKX Developer Portal](https://web3.okx.com/onchainos/dev-portal) | Required for the X Layer leg — without these the boot guard refuses to start, since this URL is registered with OKX AI and its challenge must declare `eip155:196` |
 | `KINETIX_SIGNING_KEY` | signing private key | Needs the `0x` prefix |
 | `DATA_DIR` | `/data` | The persistence knob that actually matters here |
 | `NODE_ENV` | `production` | Arms the boot guard |
@@ -59,6 +68,21 @@ Needed for premium features, exercised at scoring time: `BASE_MAINNET_RPC_URL`,
 `PINATA_API_KEY`, `PINATA_SECRET_API_KEY`, `IPFS_GATEWAY`,
 `ERC8004_IDENTITY_BASE_MAINNET`, `ERC8004_REPUTATION_BASE_MAINNET`,
 `KINETIX_ERC8004_TOKEN_ID`.
+
+`X_LAYER_PAY_TO` is optional — it defaults to the OKX Agentic Wallet address
+(`0x68fb2f902ecdff17f715ffa487a9eb94d2460f5e`) created for this listing. Only
+set it explicitly if that wallet ever changes.
+
+### OKX Developer Portal credentials
+
+`OKX_API_KEY` / `OKX_SECRET_KEY` / `OKX_PASSPHRASE` authenticate against OKX's
+own x402 facilitator (`https://web3.okx.com/api/v6/pay/x402/*`) — separate
+from, and unrelated to, the `CDP_API_KEY_ID`/`CDP_API_KEY_SECRET` pair used
+for the Base-mainnet facilitator. Apply at
+`https://web3.okx.com/onchainos/dev-portal`, then add the three values to the
+Railway x402 service's environment (dashboard step — not committable). Without
+them the service still runs, but only offers the Base-mainnet `accepts[]`
+option, which is what got the first OKX submission rejected.
 
 Do **not** set: `ALLOW_EPHEMERAL_SIGNING_KEY` (would sign receipts with a
 throwaway key), `TELEGRAM_BOT_TOKEN` (keeps the bot single-instance),
@@ -76,6 +100,12 @@ Boot logs should show `✓ Data store at /data (boot #N)`, the correct `payTo`,
 `eip155:8453`, and ERC-8004 token ID 16892. Redeploy once and confirm the boot
 count **increments rather than resetting** — that is the proof the volume is
 real. If `DATA_DIR` is unset the logs carry an explicit warning.
+
+Also confirm `exact/eip155:196 supported: true` and `exact/eip155:8453
+supported: true` — both printed right after `✓ Resource server initialized
+with facilitator`. This is `resourceServer.getSupportedKind()` reporting what
+each facilitator actually confirmed, so it proves the OKX credentials work
+before any real caller hits the route — no payment involved.
 
 Then:
 
@@ -189,9 +219,10 @@ otherwise leak container paths to an anonymous caller.
 > **Verifiable identity:** Kinetix is registered in the ERC-8004 Identity
 > Registry on Base mainnet as **token ID 16892**, controlled by
 > `0x821a61d2C3E02446eD03285df1618639eF25D2b9`. Payments are received at
-> `0x8c61756f693A321777562433E19B2AabF71f5519`. The OKX Agentic Wallet for this
-> listing is a distinct TEE-generated key; ERC-8004 token 16892 and the EAS
-> schema above are the canonical cross-venue identity anchors.
+> `0x8c61756f693A321777562433E19B2AabF71f5519` on Base, or on X Layer at the
+> OKX Agentic Wallet address for this listing — a distinct TEE-generated key;
+> ERC-8004 token 16892 and the EAS schema above are the canonical cross-venue
+> identity anchors regardless of which chain a given payment settles on.
 >
 > Free endpoint: `GET /api/v1/attestation/{receipt_id}` returns any issued
 > receipt with its signature, score breakdown, IPFS URI, and on-chain

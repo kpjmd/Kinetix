@@ -35,5 +35,23 @@
       "chain_id": 8453,
       "usdc_contract": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
     }
+  },
+  "x_layer": {
+    "chain_id": 196,
+    "assets": {
+      "usdt0": {
+        "address": "0x779dED0c9e1022225f8E0630b35a9b54bE713736",
+        "decimals": 6,
+        "name": "USD₮0",
+        "version": "1"
+      },
+      "usdg": {
+        "address": "0x4Ae46a509F6b1D9056937bA4500Cb143933D2dC8",
+        "decimals": 6,
+        "name": "USDG",
+        "version": "1"
+      }
+    },
+    "default_asset": "usdt0"
   }
 }
