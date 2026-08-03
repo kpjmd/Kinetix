@@ -184,8 +184,8 @@ const basicDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
     agent_id: "example-agent-123",
-    platform: "moltbook",
-    platform_handle: "example_agent",
+    platform: "clawstr",
+    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
     commitment_description: "Daily consistency check for 7 days"
   },
   inputSchema: {
@@ -226,8 +226,8 @@ const advancedDiscovery = declareDiscoveryExtension({
   input: {
     agent_id: "example-agent-123",
     commitment_description: "Quality and consistency verification",
-    platform: "moltbook",
-    platform_handle: "example_agent",
+    platform: "clawstr",
+    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
     criteria: {
       verification_type: "consistency",
       duration_days: 14,
@@ -280,8 +280,8 @@ const premiumDiscovery = declareDiscoveryExtension({
   input: {
     agent_id: "example-agent-123",
     commitment_description: "Full verification suite",
-    platform: "moltbook",
-    platform_handle: "example_agent",
+    platform: "clawstr",
+    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
     criteria: { duration_days: 30 },
     verification_type: "time_bound"
   },

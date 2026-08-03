@@ -203,6 +203,27 @@ async function checkPaymentChallenge() {
       `amount=${baseAmount} (expected ${EXPECTED_AMOUNT_BASE_UNITS})`
     );
   }
+
+  // Caught a real bug this way once already: the Bazaar discovery example
+  // advertised platform "moltbook" while the adjacent schema only allowed
+  // "clawstr" — a usage example that would 400 if anyone actually tried it.
+  // OKX's ASP review rejected the listing twice for "missing... usage
+  // examples" before this was found, so this stays a permanent check.
+  const discoveryBody = challenge.extensions?.bazaar?.info?.input?.body;
+  const allowedPlatforms = challenge.extensions?.bazaar?.info?.schema
+    ?.properties?.input?.properties?.body?.properties?.platform?.enum;
+  check(
+    'Bazaar discovery example is present',
+    !!discoveryBody,
+    discoveryBody ? '' : 'missing extensions.bazaar.info.input.body'
+  );
+  if (discoveryBody && Array.isArray(allowedPlatforms)) {
+    check(
+      'Bazaar discovery example uses a platform its own schema allows',
+      allowedPlatforms.includes(discoveryBody.platform),
+      `example platform=${discoveryBody.platform}, schema allows=${JSON.stringify(allowedPlatforms)}`
+    );
+  }
 }
 
 async function checkAgentContentNegotiation() {
