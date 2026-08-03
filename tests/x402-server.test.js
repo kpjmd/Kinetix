@@ -18,6 +18,14 @@ process.env.ALLOW_EPHEMERAL_SIGNING_KEY = 'true';
 delete process.env.NODE_ENV;
 delete process.env.OKX_LISTED;
 
+// Dummy OKX credentials so the server constructs its X-Layer facilitator
+// client and exercises the "both networks" accepts[] path below. Safe: in
+// TEST_MODE the resource server is never initialized, so OKXFacilitatorClient
+// never makes a real HTTP call — its constructor does no I/O.
+process.env.OKX_API_KEY = 'test';
+process.env.OKX_SECRET_KEY = 'test';
+process.env.OKX_PASSPHRASE = 'test';
+
 // A fresh empty directory, so the first request exercises the same cold-start
 // path a new Railway volume would.
 const TEST_DATA_DIR = fs.mkdtempSync(path.join(os.tmpdir(), 'kinetix-x402-'));
@@ -352,6 +360,7 @@ describe('x402 verification server', () => {
       expect(res.body.status).toBe('operational');
       expect(res.body.erc8004_token_id).toBe(16892);
       expect(res.body.x402_network).toBe('eip155:8453');
+      expect(res.body.x402_networks).toEqual(['eip155:196', 'eip155:8453']);
     });
   });
 });

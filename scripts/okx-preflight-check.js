@@ -24,6 +24,14 @@ const EXPECTED_PRICE_USDC = '1.00';
 const EXPECTED_AMOUNT_BASE_UNITS = '1000000';
 const EXPECTED_USDC_ASSET = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'; // Base mainnet USDC
 
+// OKX AI's facilitator only settles on X Layer — this is the exact network
+// OKX rejected Kinetix's first submission for not declaring. Same $1.00 in
+// USD₮0 (6-decimal), so the base-unit amount matches Base's.
+const EXPECTED_X_LAYER_NETWORK = 'eip155:196';
+const EXPECTED_X_LAYER_ASSET = '0x779dED0c9e1022225f8E0630b35a9b54bE713736'; // USD₮0
+const EXPECTED_X_LAYER_AMOUNT = '1000000';
+const EXPECTED_X_LAYER_PAY_TO = process.env.X_LAYER_PAY_TO || '0x68fb2f902ecdff17f715ffa487a9eb94d2460f5e';
+
 const baseUrl = (process.argv[2] || '').replace(/\/$/, '');
 if (!baseUrl) {
   console.error('\nUsage: node scripts/okx-preflight-check.js <base-url>\n');
@@ -96,6 +104,11 @@ async function checkHealth() {
     `x402_network=${res.body?.x402_network}`
   );
   check(
+    'reports X Layer alongside Base (OKX requirement)',
+    Array.isArray(res.body?.x402_networks) && res.body.x402_networks.includes(EXPECTED_X_LAYER_NETWORK),
+    `x402_networks=${JSON.stringify(res.body?.x402_networks)}`
+  );
+  check(
     'reports the registered ERC-8004 token id',
     res.body?.erc8004_token_id === 16892,
     `erc8004_token_id=${res.body?.erc8004_token_id}`
@@ -132,28 +145,64 @@ async function checkPaymentChallenge() {
   }
   check('challenge carries an accepts[] array', true, `${accepts.length} option(s)`);
 
-  const option = accepts[0];
-  check('scheme is "exact"', option.scheme === 'exact', `scheme=${option.scheme}`);
-  check('network is Base mainnet', option.network === EXPECTED_NETWORK, `network=${option.network}`);
-  check(
-    'payTo is the Kinetix payment wallet',
-    (option.payTo || '').toLowerCase() === EXPECTED_PAY_TO.toLowerCase(),
-    `payTo=${option.payTo}`
-  );
-  check(
-    'asset is Base mainnet USDC',
-    (option.asset || '').toLowerCase() === EXPECTED_USDC_ASSET.toLowerCase(),
-    `asset=${option.asset}`
-  );
+  // Don't assume accepts[0] is any particular network — find each option
+  // explicitly, since ordering is an implementation detail, not a contract.
+  const xLayerOption = accepts.find(a => a.network === EXPECTED_X_LAYER_NETWORK);
+  const baseOption = accepts.find(a => a.network === EXPECTED_NETWORK);
 
-  // Field name differs across x402 versions; compare the base-unit value a
-  // payer would actually sign rather than the display price.
-  const amount = option.amount ?? option.maxAmountRequired;
+  // This is exactly what OKX's first review rejected on — if this fails,
+  // do not resubmit.
   check(
-    `amount is $${EXPECTED_PRICE_USDC} USDC`,
-    String(amount) === EXPECTED_AMOUNT_BASE_UNITS,
-    `amount=${amount} (expected ${EXPECTED_AMOUNT_BASE_UNITS})`
+    'challenge includes eip155:196 (OKX requirement)',
+    !!xLayerOption,
+    xLayerOption ? '' : 'missing — this is exactly what OKX rejected the first submission on'
   );
+  if (xLayerOption) {
+    check('X Layer scheme is "exact"', xLayerOption.scheme === 'exact', `scheme=${xLayerOption.scheme}`);
+    check(
+      'X Layer payTo is the OKX Agentic Wallet',
+      (xLayerOption.payTo || '').toLowerCase() === EXPECTED_X_LAYER_PAY_TO.toLowerCase(),
+      `payTo=${xLayerOption.payTo}`
+    );
+    check(
+      'X Layer asset is USD₮0',
+      (xLayerOption.asset || '').toLowerCase() === EXPECTED_X_LAYER_ASSET.toLowerCase(),
+      `asset=${xLayerOption.asset}`
+    );
+    const xLayerAmount = xLayerOption.amount ?? xLayerOption.maxAmountRequired;
+    check(
+      `X Layer amount is $${EXPECTED_PRICE_USDC} USD₮0`,
+      String(xLayerAmount) === EXPECTED_X_LAYER_AMOUNT,
+      `amount=${xLayerAmount} (expected ${EXPECTED_X_LAYER_AMOUNT})`
+    );
+  }
+
+  check(
+    'challenge still includes eip155:8453 (existing Base callers)',
+    !!baseOption,
+    baseOption ? '' : 'missing'
+  );
+  if (baseOption) {
+    check('Base scheme is "exact"', baseOption.scheme === 'exact', `scheme=${baseOption.scheme}`);
+    check(
+      'Base payTo is the Kinetix payment wallet',
+      (baseOption.payTo || '').toLowerCase() === EXPECTED_PAY_TO.toLowerCase(),
+      `payTo=${baseOption.payTo}`
+    );
+    check(
+      'Base asset is Base mainnet USDC',
+      (baseOption.asset || '').toLowerCase() === EXPECTED_USDC_ASSET.toLowerCase(),
+      `asset=${baseOption.asset}`
+    );
+    // Field name differs across x402 versions; compare the base-unit value a
+    // payer would actually sign rather than the display price.
+    const baseAmount = baseOption.amount ?? baseOption.maxAmountRequired;
+    check(
+      `Base amount is $${EXPECTED_PRICE_USDC} USDC`,
+      String(baseAmount) === EXPECTED_AMOUNT_BASE_UNITS,
+      `amount=${baseAmount} (expected ${EXPECTED_AMOUNT_BASE_UNITS})`
+    );
+  }
 }
 
 async function checkAgentContentNegotiation() {

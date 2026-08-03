@@ -193,7 +193,9 @@ async function main() {
   const challenge = JSON.parse(
     Buffer.from(challengeRes.headers.get('payment-required'), 'base64').toString('utf8')
   );
-  const option = challenge.accepts[0];
+  // Don't assume accepts[0] is Base — the challenge now also carries an
+  // X Layer option (OKX AI requirement), so find the Base entry explicitly.
+  const option = challenge.accepts.find(a => a.network === NETWORK) || challenge.accepts[0];
 
   console.log('\nPayment challenge:');
   console.log(`  amount:  ${formatUnits(BigInt(option.amount), 6)} USDC`);
