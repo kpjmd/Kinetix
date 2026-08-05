@@ -209,13 +209,19 @@ async function checkPaymentChallenge() {
   // "clawstr" — a usage example that would 400 if anyone actually tried it.
   // OKX's ASP review rejected the listing twice for "missing... usage
   // examples" before this was found, so this stays a permanent check.
+  // schema is a sibling of info under extensions.bazaar, not nested inside it.
   const discoveryBody = challenge.extensions?.bazaar?.info?.input?.body;
-  const allowedPlatforms = challenge.extensions?.bazaar?.info?.schema
+  const allowedPlatforms = challenge.extensions?.bazaar?.schema
     ?.properties?.input?.properties?.body?.properties?.platform?.enum;
   check(
     'Bazaar discovery example is present',
     !!discoveryBody,
     discoveryBody ? '' : 'missing extensions.bazaar.info.input.body'
+  );
+  check(
+    'Bazaar discovery schema declares an allowed-platform enum',
+    Array.isArray(allowedPlatforms) && allowedPlatforms.length > 0,
+    `allowedPlatforms=${JSON.stringify(allowedPlatforms)}`
   );
   if (discoveryBody && Array.isArray(allowedPlatforms)) {
     check(
