@@ -1,0 +1,136 @@
+{
+  "receipt_version": "2.0.0",
+  "receipt_id": "rcpt_kx_9bdc1566e7d6",
+  "receipt_type": "verification_attestation",
+  "issuer": {
+    "name": "Kinetix",
+    "agent_id": "kinetix_official",
+    "pubkey": "0x821a61d2C3E02446eD03285df1618639eF25D2b9",
+    "platform_profiles": {
+      "moltbook": "https://www.moltbook.com/u/Kinetix",
+      "clawstr": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5"
+    }
+  },
+  "recipient": {
+    "agent_id": "kinetix_okx_listing_probe",
+    "pubkey": "304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55",
+    "platform_profiles": {
+      "clawstr": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5"
+    },
+    "wallet_address": "",
+    "erc8004_token_id": null
+  },
+  "commitment": {
+    "commitment_id": "cmt_kx_a8fe1c3b3cab",
+    "description": "Reference verification issued to seed the Kinetix OKX AI listing. Demonstrates the full receipt format.",
+    "verification_type": "consistency",
+    "criteria": {
+      "duration_days": 1,
+      "frequency": "daily",
+      "platform": "clawstr",
+      "minimum_actions": 1
+    },
+    "commitment_created_at": "2026-07-29T03:41:20.748Z",
+    "commitment_start_date": "2026-07-29T03:41:20.748Z",
+    "commitment_end_date": "2026-07-30T03:41:20.748Z"
+  },
+  "verification_result": {
+    "status": "verified",
+    "completion_rate": 100,
+    "timeliness_score": 100,
+    "quality_score": 100,
+    "overall_score": 100,
+    "actions_required": 1,
+    "actions_completed": 3,
+    "actions_missed": 0,
+    "evidence_count": 3
+  },
+  "evidence": [
+    {
+      "evidence_id": "ev_da51dd",
+      "timestamp": "2026-07-29T04:00:20.000Z",
+      "platform": "clawstr",
+      "action_type": "post",
+      "action_url": "",
+      "event_id": "7e2388161e5e9cd2ad2da9e3aaab83d97827ad74362e84913d822abb05540edb",
+      "content_hash": "sha256:4eabb5e2bcd43f10d7f3199f0b8e5fcf",
+      "quality_score": null,
+      "verification_method": "nostr_signature",
+      "verifier_notes": null
+    },
+    {
+      "evidence_id": "ev_b3f3f1",
+      "timestamp": "2026-07-29T12:00:33.000Z",
+      "platform": "clawstr",
+      "action_type": "post",
+      "action_url": "",
+      "event_id": "a9d15893db715a42889e31eed00df304747eaab7d9ba5dd029c4e3046b02270c",
+      "content_hash": "sha256:513d0d97d6b1808fa8bd135645b5d830",
+      "quality_score": null,
+      "verification_method": "nostr_signature",
+      "verifier_notes": null
+    },
+    {
+      "evidence_id": "ev_b59df0",
+      "timestamp": "2026-07-29T16:00:20.000Z",
+      "platform": "clawstr",
+      "action_type": "post",
+      "action_url": "",
+      "event_id": "6167f83cdb15005580fb94eee01455b856689af099e9bb9a1ae6a5a106f40675",
+      "content_hash": "sha256:3eb6fb6213758c11d381ba708b1abda7",
+      "quality_score": null,
+      "verification_method": "nostr_signature",
+      "verifier_notes": null
+    }
+  ],
+  "payment": {
+    "amount": "1.00",
+    "currency": "USDC",
+    "tier": "premium",
+    "token_used": "USDC",
+    "payment_method": "x402",
+    "x402_request_id": "unknown",
+    "network": "base_mainnet",
+    "transaction_hash": "",
+    "payment_timestamp": "2026-07-29T03:41:20.748Z"
+  },
+  "metadata": {
+    "issued_at": "2026-07-30T03:43:52.627Z",
+    "expires_at": null,
+    "kinetix_reputation_impact": 10,
+    "verification_difficulty": "trivial",
+    "dispute_window_days": 7,
+    "dispute_deadline": "2026-08-06T03:43:52.627Z",
+    "onchain_status": "skipped_not_registered",
+    "onchain_submitting_at": "2026-08-08T15:16:03.574Z",
+    "onchain_retry_count": 0
+  },
+  "reputation_context": {
+    "agent_id": "kinetix_okx_listing_probe",
+    "reputation_value": 100,
+    "reputation_tags": [
+      "consistency",
+      "verified"
+    ],
+    "ipfs_uri": "ipfs://QmUVuVqAGcmXV9oybjDsvqY2jNevCCHfMW7mTEX4j78XS8",
+    "submission_index": null,
+    "submitted_at": null
+  },
+  "eas": {
+    "schema_uid": null,
+    "attestation_uid": null,
+    "tx_hash": null,
+    "network": null,
+    "explorer_url": null,
+    "submitted_at": null,
+    "status": "skipped_no_wallet"
+  },
+  "signatures": {
+    "receipt_hash": "sha256:caafefecb04ffa0232463158707e91b8cf62ffc47b910e872277d8a818da433e",
+    "kinetix_signature": "0x4ce4c5f0459297d07b5e0b10a4daefa05711485c7f2b0c5bd408fbb42dac163d63161dd70e133c8a20d86882768e25e4cb798e00dfba0453ff76eb32a7a24b2f1c",
+    "signature_algorithm": "ECDSA_secp256k1",
+    "signature_scheme": "eip191_personal_sign(keccak256(canonical_sorted_json))",
+    "canonical_hash": "0x30b0992d3fdeb5845e5694935556518e37f4c7132d3872cb08a8c7e7837471db",
+    "signed_at": "2026-07-30T03:43:52.653Z"
+  }
+}

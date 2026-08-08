@@ -14,11 +14,16 @@ const reputationService = require('../utils/erc8004-reputation');
 const easService = require('../utils/eas-attestation');
 const ipfsManager = require('../utils/ipfs-manager');
 const erc8004Lookup = require('../utils/erc8004-lookup');
+const { effectiveTokenId, hasEvmWallet } = require('../utils/receipt-identity');
 
 // Once in one of these ERC-8004 states, an attestation is never retried again.
 const TERMINAL_STATUSES = ['submitted', 'skipped_self_verification', 'failed_permanent'];
-// EAS submission states that are terminal (no further retry).
-const EAS_TERMINAL_STATUSES = ['submitted', 'skipped_no_wallet', 'failed_permanent'];
+// EAS submission states that are terminal (no further retry). Deliberately
+// does NOT include 'skipped_no_wallet' — eas-attestation.js no longer
+// produces it (a missing wallet anchors at the zero address instead of
+// skipping), so any receipt still carrying that status from before this
+// change is re-targeted and gets its zero-address anchor on the next run.
+const EAS_TERMINAL_STATUSES = ['submitted', 'failed_permanent'];
 const MAX_RETRY_COUNT = 10;
 // A receipt marked 'submitting' with no tx hash yet is assumed to be actively
 // mid-submit by another path (issuance, or a concurrent run). Only after this
@@ -88,10 +93,13 @@ class ReconciliationService {
     try {
       const all = await dataStore.listAttestations();
       // A receipt is a target if EITHER its ERC-8004 or its EAS submission is
-      // still non-terminal — EAS failures were previously never reconciled.
+      // still non-terminal. `!r.eas` (pre-backfill-eas-block.js receipts, or
+      // any receipt issued before this repo added the eas block) counts as
+      // non-terminal too — _reconcileEas lazily creates a default 'pending'
+      // block for them, so every receipt eventually gets an EAS anchor.
       const targets = all.filter(r =>
-        !TERMINAL_STATUSES.includes(r.metadata?.onchain_status) ||
-        (r.eas && !EAS_TERMINAL_STATUSES.includes(r.eas.status))
+        !this._isErcTerminal(r) ||
+        !r.eas || !EAS_TERMINAL_STATUSES.includes(r.eas.status)
       );
 
       this._log(`Reconciling ${targets.length} attestation(s)`);
@@ -122,8 +130,14 @@ class ReconciliationService {
         if (outcome.status === 'submitted') succeeded++;
         else if (outcome.status.startsWith('skipped') || outcome.status === 'submitting' || outcome.status === 'deferred') skipped++;
         else failed++;
-        // Either an ERC-8004 or an EAS on-chain send counts toward the run cap.
-        if (ATTEMPT_STATUSES.includes(outcome.status) || ATTEMPT_STATUSES.includes(outcome.eas_status)) attempts++;
+        // Each leg that actually attempted an on-chain send counts separately
+        // toward the run cap — a receipt can send both an ERC-8004 tx and an
+        // EAS tx in the same pass. Counting once per receipt (as before)
+        // let a run of MAX_SUBMISSIONS_PER_RUN receipts broadcast up to 2x
+        // that many transactions, which stopped being a rounding error once
+        // EAS started anchoring nearly every receipt instead of skipping most.
+        if (ATTEMPT_STATUSES.includes(outcome.status)) attempts++;
+        if (ATTEMPT_STATUSES.includes(outcome.eas_status)) attempts++;
       }
 
       this._log('Reconciliation complete', { succeeded, skipped, failed, attempts });
@@ -152,6 +166,25 @@ class ReconciliationService {
   }
 
   /**
+   * True if a receipt's ERC-8004 leg is terminal — either one of the flat
+   * TERMINAL_STATUSES, or 'skipped_not_registered' when nothing could ever
+   * change the outcome: no EVM wallet to resolve a token id from, and no
+   * token id already known (from issuance or a prior resolve). This is
+   * honest specifically because erc8004Lookup.resolveTokenId('') returns
+   * null immediately — with no wallet, there is genuinely nothing left to
+   * retry. A wallet-bearing recipient who simply hasn't registered yet stays
+   * non-terminal, since they may register later (REPUTATION_RECEIPT.MD).
+   */
+  _isErcTerminal(receipt) {
+    const status = receipt.metadata?.onchain_status;
+    if (TERMINAL_STATUSES.includes(status)) return true;
+    if (status === 'skipped_not_registered') {
+      return !hasEvmWallet(receipt) && !effectiveTokenId(receipt);
+    }
+    return false;
+  }
+
+  /**
    * Reconcile both on-chain submissions for a receipt: the ERC-8004 Reputation
    * Registry entry and the EAS attestation. Each is independent and best-effort;
    * the returned status reflects the ERC-8004 outcome (for backward
@@ -177,8 +210,24 @@ class ReconciliationService {
    * duplicate risk of a crash during confirmation.
    */
   async _reconcileEas(receipt) {
+    // Pre-backfill-eas-block.js receipts have no eas block at all. Every
+    // receipt anchors on EAS now (zero-address fallback when there's no
+    // wallet), so treat a missing block the same as a fresh 'pending' one
+    // rather than skipping it — lazily create it instead of requiring a
+    // separate backfill run.
+    if (!receipt.eas) {
+      receipt.eas = {
+        schema_uid: null,
+        attestation_uid: null,
+        tx_hash: null,
+        network: null,
+        explorer_url: null,
+        submitted_at: null,
+        status: 'pending'
+      };
+    }
     const eas = receipt.eas;
-    if (!eas || EAS_TERMINAL_STATUSES.includes(eas.status)) return null;
+    if (EAS_TERMINAL_STATUSES.includes(eas.status)) return null;
 
     const retry = eas.retry_count || 0;
     if (retry >= MAX_RETRY_COUNT) {
@@ -216,6 +265,8 @@ class ReconciliationService {
       eas.explorer_url = result.explorerUrl;
       eas.submitted_at = new Date().toISOString();
       eas.status = 'submitted';
+      eas.recipient = result.recipient;
+      eas.anchor_mode = result.anchorMode;
       try {
         await dataStore.saveAttestation(receipt);
         await dataStore.saveEasSubmission(receipt.receipt_id, {
@@ -224,6 +275,7 @@ class ReconciliationService {
           transaction_hash: result.txHash,
           attestation_uid: result.uid,
           schema_uid: easService.network.schemaUID,
+          anchor_mode: result.anchorMode,
           recovered: true,
           submitted_at: new Date().toISOString()
         });
@@ -235,7 +287,11 @@ class ReconciliationService {
       this._log(`Reconciled EAS attestation for ${receipt.receipt_id}`, { uid: result.uid });
       return { status: 'submitted', detail: result.uid };
     } catch (error) {
-      const status = (error.code === 'NO_WALLET' || error.message?.startsWith('NO_WALLET:')) ? 'skipped_no_wallet' : 'failed';
+      // NO_WALLET is no longer thrown by eas-attestation.js — a missing
+      // wallet now anchors at the zero address rather than skipping. A gas
+      // spike defers without burning retry budget, mirroring _recordFailure's
+      // treatment of the ERC-8004 leg.
+      const status = (error.code === 'GAS_CEILING' || error.message?.startsWith('GAS_CEILING:')) ? 'deferred' : 'failed';
       eas.status = status;
       if (status === 'failed') {
         eas.retry_count = retry + 1;
@@ -266,7 +322,7 @@ class ReconciliationService {
     // state. reconcileAll pre-filters these, but /retry_onchain <id> calls this
     // directly — without this check it would re-submit an already-'submitted'
     // receipt, creating a duplicate on-chain feedback entry.
-    if (TERMINAL_STATUSES.includes(receipt.metadata?.onchain_status)) {
+    if (this._isErcTerminal(receipt)) {
       return {
         receipt_id: receipt.receipt_id,
         status: receipt.metadata.onchain_status,
@@ -318,13 +374,49 @@ class ReconciliationService {
       await reputationService.initialize();
       const network = reputationService.networkName;
 
-      if (!receipt.recipient?.erc8004_token_id) {
+      if (!effectiveTokenId(receipt)) {
         const tokenId = await erc8004Lookup.resolveTokenId(receipt.recipient?.wallet_address, network);
         if (tokenId) {
-          receipt.recipient.erc8004_token_id = tokenId;
+          // Written to metadata, NOT recipient — recipient.* is inside the
+          // signed canonical payload and is frozen post-issuance (see the
+          // comment on MUTABLE_PATHS in receipt-canonical.js). Writing here
+          // used to mutate recipient.erc8004_token_id directly, silently
+          // invalidating the signature and desyncing the already-pinned
+          // IPFS/on-chain hashes from the stored receipt.
+          receipt.metadata.resolved_erc8004_token_id = tokenId;
+          receipt.metadata.resolved_erc8004_token_id_at = new Date().toISOString();
           await dataStore.saveAttestation(receipt);
           this._log(`Resolved ERC-8004 token ID ${tokenId} for ${receipt.receipt_id}`);
         }
+      }
+
+      // Still nothing to attach reputation to. Return immediately — before the
+      // IPFS upload and before marking 'submitting' — instead of running the
+      // full submit path only to have _mapReceiptToFeedback reject it. Before
+      // this restructuring, an unregistered-but-retryable receipt (has a
+      // wallet, no token id yet) re-ran the whole block every 3h — IPFS check,
+      // onchain_status='submitting'+save, a NOT_REGISTERED throw, a fresh
+      // failed reputation-submission record — purely to rediscover the same
+      // fact it already knew coming in. Only persist when the status actually
+      // changes, so an already-'skipped_not_registered' receipt stops being
+      // rewritten on every pass too.
+      if (!effectiveTokenId(receipt)) {
+        const statusChanged = receipt.metadata.onchain_status !== 'skipped_not_registered';
+        receipt.metadata.onchain_status = 'skipped_not_registered';
+        if (statusChanged) {
+          try {
+            await dataStore.saveAttestation(receipt);
+          } catch (persistError) {
+            this._log(`Failed to persist skipped_not_registered for ${receipt.receipt_id}: ${persistError.message}`);
+          }
+        }
+        return {
+          receipt_id: receipt.receipt_id,
+          status: 'skipped_not_registered',
+          detail: hasEvmWallet(receipt)
+            ? 'wallet present but not yet registered on ERC-8004; will retry'
+            : 'no EVM wallet and no ERC-8004 token id; nothing to resolve'
+        };
       }
 
       let ipfsHash = receipt.reputation_context?.ipfs_uri?.replace('ipfs://', '');

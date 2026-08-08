@@ -516,6 +516,11 @@ class VerificationService {
       receipt.eas.explorer_url = result.explorerUrl;
       receipt.eas.submitted_at = new Date().toISOString();
       receipt.eas.status = 'submitted';
+      // Which recipient the attestation actually names on-chain: a real EVM
+      // wallet ("recipient"), or the zero address when the recipient has none
+      // ("unattributed" — still fully verifiable via receiptHash/score/ipfsUri).
+      receipt.eas.recipient = result.recipient;
+      receipt.eas.anchor_mode = result.anchorMode;
 
       // Success — a persistence failure here must NOT downgrade eas.status to
       // 'failed' (the attestation already landed on-chain); log and keep it.
@@ -527,6 +532,7 @@ class VerificationService {
           transaction_hash: result.txHash,
           attestation_uid: result.uid,
           schema_uid: easService.network.schemaUID,
+          anchor_mode: result.anchorMode,
           submitted_at: new Date().toISOString()
         });
       } catch (persistError) {
@@ -537,8 +543,12 @@ class VerificationService {
 
       this._log(`Successfully submitted attestation ${receipt.receipt_id} to EAS`);
     } catch (error) {
-      // Log but don't fail - attestation is still valid without an EAS entry
-      const status = (error.code === 'NO_WALLET' || error.message?.startsWith('NO_WALLET:')) ? 'skipped_no_wallet' : 'failed';
+      // Log but don't fail - attestation is still valid without an EAS entry.
+      // NO_WALLET is no longer thrown by eas-attestation.js (a missing wallet
+      // now anchors at the zero address instead of skipping), so the only
+      // paths left here are a transient gas spike — deferred, not terminal,
+      // so it doesn't burn the retry budget — or a genuine failure.
+      const status = (error.code === 'GAS_CEILING' || error.message?.startsWith('GAS_CEILING:')) ? 'pending' : 'failed';
       this._log(`EAS submission failed (attestation still valid)`, {
         error: error.message,
         status

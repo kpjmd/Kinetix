@@ -70,6 +70,13 @@ class DiscoveryService {
       source_event_id: request.source_event_id || null,
       agent_id: request.agent_id,
       agent_pubkey: request.agent_pubkey || null,
+      // Carried through so approveSuggestion can pass them on to the
+      // commitment — without a producer for these, an approved suggestion
+      // could never anchor on-chain even when the requester had an EVM
+      // identity to offer. Nothing currently sets these on a `request`; this
+      // is the field, not (yet) a caller that populates it.
+      agent_wallet_address: request.agent_wallet_address || null,
+      agent_erc8004_token_id: request.agent_erc8004_token_id || null,
       claim_text: request.claim_text,
       original_content_snippet: request.original_content_snippet || '',
       suggested_verification: request.suggested_verification,
@@ -121,6 +128,9 @@ class DiscoveryService {
       source_event_id: discovery.source_event_id || null,
       agent_id: discovery.agent_id,
       agent_pubkey: discovery.agent_pubkey || null,
+      // Same passthrough as addVerificationRequest above — see that comment.
+      agent_wallet_address: discovery.agent_wallet_address || null,
+      agent_erc8004_token_id: discovery.agent_erc8004_token_id || null,
       claim_text: discovery.claim_text,
       original_content_snippet: discovery.original_content_snippet || '',
       suggested_verification: discovery.suggested_verification,
@@ -222,7 +232,15 @@ class DiscoveryService {
       description: sv.description,
       verification_type: sv.verification_type,
       criteria: sv.criteria,
-      erc8004_token_id: suggestion.agent_erc8004_token_id || null
+      erc8004_token_id: suggestion.agent_erc8004_token_id || null,
+      // Previously missing entirely: a discovery-sourced commitment could
+      // never carry an EVM wallet, so attestation-service.js always blanked
+      // recipient.wallet_address for one regardless of what the agent
+      // actually held — the sole route to attaching an identity was a paid
+      // x402 call. erc8004_token_id above had the same problem in practice:
+      // nothing ever set agent_erc8004_token_id on a suggestion either, until
+      // the addSuggestion/addVerificationRequest passthrough above existed.
+      wallet_address: suggestion.agent_wallet_address || ''
     };
 
     // Set platform profile based on source

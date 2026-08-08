@@ -332,11 +332,19 @@ dispute_deadline - After this, receipt is final
 onchain_status - State of the ERC-8004 reputation submission:
 pending|submitting - not yet resolved; reconciliation will retry
 submitted - written to the Reputation Registry
-skipped_not_registered - the recipient holds no ERC-8004 identity, so there is
-  nothing on-chain to attach reputation to. Terminal, and expected for any
-  agent identified only by a Nostr key or platform handle.
+skipped_not_registered - the recipient holds no ERC-8004 token id. Terminal
+  only when the recipient also has no EVM wallet_address — with neither, there
+  is nothing reconciliation could ever resolve a token id from, which is what
+  makes any Nostr-only or platform-handle-only agent land here permanently.
+  When an EVM wallet_address IS present but simply isn't registered yet, this
+  status stays non-terminal: reconciliation retries it every cycle via
+  erc8004Lookup.resolveTokenId(wallet_address), since the recipient may
+  register later.
 skipped_self_verification - the recipient resolves to Kinetix's own token, which
   the registry will not accept. Terminal.
+deferred - a transient issuer-side or gas condition (Kinetix's own identity
+  record briefly unreadable, or a gas-price spike above MAX_SUBMISSION_FEE_GWEI).
+  Not terminal and does not burn retry budget — retried next cycle.
 failed_permanent - retry budget exhausted. Terminal.
 The receipt is signed and IPFS-pinned regardless; a skip records honestly that
 the on-chain leg did not apply, it does not mean the verification failed.
@@ -363,8 +371,12 @@ How it works:
 
 The receipt is reduced to a canonical payload: a deep copy with keys recursively
   sorted and every post-issuance mutable field removed — the signatures block,
-  metadata.onchain_*, reputation_context.ipfs_uri/submission_index/submitted_at,
-  and eas. See utils/receipt-canonical.js for the exact exclusion list.
+  metadata.onchain_*, metadata.resolved_erc8004_token_id{,_at} (a token id
+  resolved by reconciliation after issuance, from the recipient's wallet — see
+  utils/receipt-identity.js), reputation_context.ipfs_uri/submission_index/submitted_at,
+  and eas. recipient.* is NOT in this list and is never mutated after signing;
+  it is fixed for the life of the receipt. See utils/receipt-canonical.js for
+  the exact exclusion list.
 receipt_hash is the SHA-256 of that canonical JSON, for human comparison.
 canonical_hash is its keccak256 — the digest actually signed, and the same
   digest committed on-chain as the EAS receiptHash and the ERC-8004 feedbackHash.
@@ -684,7 +696,13 @@ typescriptinterface VerificationReceipt {
       | "submitted"
       | "skipped_not_registered"
       | "skipped_self_verification"
+      | "deferred"
       | "failed_permanent";
+    // Set only once reconciliation resolves a token id after issuance, from
+    // recipient.wallet_address. A mutable field (see utils/receipt-canonical.js
+    // MUTABLE_PATHS) — unlike recipient.erc8004_token_id, which is fixed at
+    // signing and never updated.
+    resolved_erc8004_token_id?: string | null;
   };
   
   signatures: {
@@ -703,6 +721,25 @@ typescriptinterface VerificationReceipt {
     recipient_verification_streak: number;
     kinetix_total_verifications_issued: number;
     percentile_rank: number;
+  };
+
+  // Chain-agnostic EAS anchor. Issued for every receipt: when the recipient
+  // has no EVM wallet_address, the attestation still lands on-chain with
+  // recipient set to the zero address (anchor_mode: "unattributed") rather
+  // than being skipped, so receiptHash/score/ipfsUri are always independently
+  // verifiable on Base. Entirely excluded from MUTABLE_PATHS, so any field
+  // here can be added or mutated after signing without affecting the receipt
+  // signature.
+  eas: {
+    schema_uid: string | null;
+    attestation_uid: string | null;
+    tx_hash: string | null;
+    network: string | null;
+    explorer_url: string | null;
+    submitted_at: string | null;
+    status: "pending" | "submitting" | "submitted" | "deferred" | "failed" | "failed_permanent";
+    recipient?: string;                          // the EVM address the EAS attestation names
+    anchor_mode?: "recipient" | "unattributed";   // "unattributed" = anchored at the zero address
   };
 }
 

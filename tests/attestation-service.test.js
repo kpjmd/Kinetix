@@ -174,5 +174,54 @@ describe('AttestationService', () => {
       const isValid = service.verifyReceipt(receipt);
       expect(isValid).toBe(false);
     });
+
+    it('stays valid after metadata.resolved_erc8004_token_id is set post-issuance', async () => {
+      // P1: this is the mutable field reconciliation now writes a
+      // late-resolved token id to, instead of recipient.erc8004_token_id.
+      const commitment = {
+        commitment_id: 'cmt_kx_resolved',
+        agent_id: 'test_agent',
+        pubkey: '',
+        platform_profiles: {},
+        description: 'Test',
+        verification_type: 'consistency',
+        criteria: {},
+        difficulty: 'trivial',
+        created_at: '2025-02-01T00:00:00Z',
+        start_date: '2025-02-01T00:00:00Z',
+        end_date: '2025-02-02T00:00:00Z',
+        evidence: [],
+        scoring_result: { status: 'failed', overall_score: 0, evidence_count: 0 }
+      };
+
+      const receipt = await service.generateReceipt(commitment);
+      receipt.metadata.resolved_erc8004_token_id = '16892';
+      receipt.metadata.resolved_erc8004_token_id_at = new Date().toISOString();
+
+      expect(service.verifyReceipt(receipt)).toBe(true);
+    });
+
+    it('becomes invalid if recipient.erc8004_token_id is mutated post-issuance — the bug the freeze prevents', async () => {
+      const commitment = {
+        commitment_id: 'cmt_kx_frozen',
+        agent_id: 'test_agent',
+        pubkey: '',
+        platform_profiles: {},
+        description: 'Test',
+        verification_type: 'consistency',
+        criteria: {},
+        difficulty: 'trivial',
+        created_at: '2025-02-01T00:00:00Z',
+        start_date: '2025-02-01T00:00:00Z',
+        end_date: '2025-02-02T00:00:00Z',
+        evidence: [],
+        scoring_result: { status: 'failed', overall_score: 0, evidence_count: 0 }
+      };
+
+      const receipt = await service.generateReceipt(commitment);
+      receipt.recipient.erc8004_token_id = '16892';
+
+      expect(service.verifyReceipt(receipt)).toBe(false);
+    });
   });
 });

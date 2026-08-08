@@ -17,12 +17,28 @@
 const { ethers } = require('ethers');
 
 // Post-issuance mutable fields, by path. Excluded from the canonical payload.
+//
+// recipient.* is deliberately NOT here. attestation-service.js writes it once
+// at signing time and nothing may touch it after: reconciliation-service.js
+// used to write a late-resolved recipient.erc8004_token_id directly, which
+// silently invalidated the signature (recipient IS in the signed payload) and
+// desynchronised the already-submitted/pinned on-chain hashes from the stored
+// receipt. A late-resolved token id now lands in metadata.resolved_erc8004_token_id
+// instead (see utils/receipt-identity.js effectiveTokenId) — a brand-new key
+// absent on every receipt written before this change, so adding it here does
+// not alter any existing receipt's canonical hash (delete on an absent key is
+// a no-op). Do not add ['recipient', 'erc8004_token_id'] to this list — that
+// key is written (possibly as null) on every receipt already issued, so
+// excluding it would change every existing canonical hash and invalidate
+// every stored signature.
 const MUTABLE_PATHS = [
   ['signatures'],
   ['metadata', 'onchain_status'],
   ['metadata', 'onchain_retry_count'],
   ['metadata', 'onchain_tx_hash'],
   ['metadata', 'onchain_submitting_at'],
+  ['metadata', 'resolved_erc8004_token_id'],
+  ['metadata', 'resolved_erc8004_token_id_at'],
   ['reputation_context', 'ipfs_uri'],
   ['reputation_context', 'submission_index'],
   ['reputation_context', 'submitted_at'],
