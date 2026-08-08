@@ -38,6 +38,65 @@ jest.mock('@coinbase/x402', () => ({
   createFacilitatorConfig: () => ({ url: 'https://facilitator.test.invalid' })
 }));
 
+// This file requires the REAL api/x402/server.js, which requires the REAL
+// verification-service.js singleton — meaning the tests below that let a
+// commitment expire and score (see "scores an expired commitment..." and
+// "exposes receipt_id..." further down) run the REAL issueAttestation()
+// path, including its best-effort on-chain submission calls, unless every
+// external side effect it can reach is mocked here.
+//
+// This file sets NETWORK_ID/DEFAULT_NETWORK to base_mainnet (above) and
+// nothing in this repo substitutes a fake signing key for eas-attestation.js
+// or erc8004-reputation.js (only attestation-service.js has an
+// ALLOW_EPHEMERAL_SIGNING_KEY escape hatch, for the receipt SIGNING key, not
+// these). Both modules call require('dotenv').config() at their own top
+// level and pick up the real KINETIX_SIGNING_KEY from .env regardless of
+// this file's test-mode flags. Before these mocks existed, that combination
+// broadcast 6 real attest() transactions to Base MAINNET from Kinetix's
+// actual production wallet during a routine `npx jest` run — the ERC-8004
+// leg was accidentally safe only because these tests' payloads never include
+// erc8004_token_id, so _mapReceiptToFeedback throws before any network call;
+// EAS had no equivalent guard once eas-attestation.js stopped throwing
+// NO_WALLET for a walletless recipient (see utils/eas-attestation.js) and
+// started anchoring at the zero address instead. ipfs-manager.js is real
+// Pinata credentials from .env too, so it is mocked for the same reason —
+// independent of the on-chain issue, an unmocked run here was pinning test
+// fixture data to public IPFS on every test run.
+//
+// Do not remove these mocks to "test the real path" — use
+// scripts/seed-okx-receipt.js (which is deliberately gated behind --confirm
+// and a manual balance check) for that instead.
+jest.mock('../utils/ipfs-manager', () => ({
+  uploadJSON: jest.fn().mockResolvedValue({
+    ipfsHash: 'QmTestFixtureNotARealPin',
+    gatewayUrl: 'https://gateway.pinata.cloud/ipfs/QmTestFixtureNotARealPin'
+  })
+}));
+jest.mock('../utils/eas-attestation', () => ({
+  initialize: jest.fn().mockResolvedValue(undefined),
+  submitAttestation: jest.fn().mockResolvedValue({
+    uid: '0xtest-eas-uid',
+    txHash: '0xtest-eas-tx',
+    explorerUrl: 'https://test.invalid/attestation/0xtest-eas-uid',
+    recipient: '0x0000000000000000000000000000000000000000',
+    anchorMode: 'unattributed'
+  }),
+  networkName: 'base_mainnet',
+  network: { schemaUID: '0x' + 'ab'.repeat(32) }
+}));
+jest.mock('../utils/erc8004-reputation', () => ({
+  initialize: jest.fn().mockResolvedValue(undefined),
+  // None of this file's payloads ever set erc8004_token_id, so the real
+  // module would reject every attempt with NOT_REGISTERED before any network
+  // call anyway (see utils/erc8004-reputation.js _mapReceiptToFeedback) —
+  // this mock just makes that explicit and removes the real module's own
+  // require('dotenv').config()/createSigner() from the load path entirely.
+  submitAttestation: jest.fn().mockRejectedValue(
+    Object.assign(new Error('Recipient has no erc8004_token_id.'), { code: 'NOT_REGISTERED' })
+  ),
+  networkName: 'base_mainnet'
+}));
+
 const request = require('supertest');
 const server = require('../api/x402/server');
 

@@ -10,6 +10,8 @@ const dataStore = require('../services/data-store');
 const { createSigner } = require('./signing-key');
 const { resolveNetwork } = require('./network');
 const { canonicalHash } = require('./receipt-canonical');
+const { effectiveTokenId } = require('./receipt-identity');
+const { assertGasWithinCeiling } = require('./gas-guard');
 
 const NETWORKS = {
   base_mainnet: {
@@ -106,8 +108,11 @@ class ERC8004ReputationService {
    * Map attestation receipt to giveFeedback parameters
    */
   _mapReceiptToFeedback(receipt, ipfsHash) {
-    // agentId: the recipient's ERC-8004 token ID (not Kinetix's own)
-    const agentId = receipt.recipient?.erc8004_token_id;
+    // agentId: the recipient's ERC-8004 token ID (not Kinetix's own).
+    // effectiveTokenId prefers a late-resolved token
+    // (metadata.resolved_erc8004_token_id) over the one supplied at issuance
+    // (recipient.erc8004_token_id, frozen) — see utils/receipt-identity.js.
+    const agentId = effectiveTokenId(receipt);
     if (!agentId) {
       const err = new Error(
         `Recipient "${receipt.recipient?.agent_id}" has no erc8004_token_id. ` +
@@ -154,22 +159,12 @@ class ERC8004ReputationService {
 
   /**
    * Throw GAS_CEILING if current gas price exceeds the configured ceiling.
-   * Ceiling is MAX_SUBMISSION_FEE_GWEI (default 50 gwei — far above Base's
-   * normal sub-gwei fees, so it only trips on abnormal spikes).
+   * Delegates to the shared guard in utils/gas-guard.js, which the EAS
+   * submitter also uses — kept as a thin instance method so existing callers
+   * (this.\_assertGasWithinCeiling()) don't need to change.
    */
   async _assertGasWithinCeiling() {
-    const feeData = await this.provider.getFeeData();
-    const gasPrice = feeData.maxFeePerGas || feeData.gasPrice;
-    if (!gasPrice) return; // fee data unavailable — do not block
-    const ceilingGwei = process.env.MAX_SUBMISSION_FEE_GWEI || '50';
-    const ceilingWei = ethers.parseUnits(String(ceilingGwei), 'gwei');
-    if (gasPrice > ceilingWei) {
-      const err = new Error(
-        `GAS_CEILING: gas price ${ethers.formatUnits(gasPrice, 'gwei')} gwei exceeds ceiling ${ceilingGwei} gwei — deferring submission.`
-      );
-      err.code = 'GAS_CEILING';
-      throw err;
-    }
+    return assertGasWithinCeiling(this.provider);
   }
 
   /**
@@ -224,8 +219,12 @@ class ERC8004ReputationService {
       return true;
     }
 
-    // Also catch the case where the recipient resolves to Kinetix's own token.
-    const recipientTokenId = receipt.recipient?.erc8004_token_id;
+    // Also catch the case where the recipient resolves to Kinetix's own token
+    // — via effectiveTokenId, so a token resolved AFTER issuance
+    // (metadata.resolved_erc8004_token_id) is checked too. Reading only
+    // recipient.erc8004_token_id here would let a late resolve that happens
+    // to land Kinetix's own token slip past this guard and revert on-chain.
+    const recipientTokenId = effectiveTokenId(receipt);
     if (recipientTokenId != null && this.kinetixTokenId != null &&
         String(recipientTokenId) === String(this.kinetixTokenId)) {
       return true;

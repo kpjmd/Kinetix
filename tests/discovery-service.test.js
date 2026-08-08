@@ -62,4 +62,37 @@ describe('DiscoveryService dedup', () => {
     const second = await discoveryService.addVerificationRequest(makeRequest());
     expect(second).not.toBeNull();
   });
+
+  it('carries an EVM wallet through from suggestion to commitment, so a discovery-sourced receipt can anchor on-chain', async () => {
+    // Previously agent_wallet_address had no producer on a suggestion at all,
+    // so an approved discovery-sourced commitment could never get an EVM
+    // identity — the only route was a paid x402 call that supplied one
+    // directly. This is the passthrough that closes that gap.
+    const createVerification = jest.fn().mockResolvedValue({ verification_id: 'v1' });
+    const request = await discoveryService.addVerificationRequest(
+      makeRequest({ agent_wallet_address: '0x' + 'b'.repeat(40), agent_erc8004_token_id: '123' })
+    );
+
+    discoveryService.initialize({ createVerification }, null);
+    await discoveryService.approveSuggestion(request.id, 'admin');
+
+    expect(createVerification).toHaveBeenCalledWith(
+      expect.objectContaining({
+        wallet_address: '0x' + 'b'.repeat(40),
+        erc8004_token_id: '123'
+      })
+    );
+  });
+
+  it('defaults to an empty wallet_address (not null) when the suggestion has none, so attestation-service can distinguish "no wallet" from a real EVM address', async () => {
+    const createVerification = jest.fn().mockResolvedValue({ verification_id: 'v1' });
+    const request = await discoveryService.addVerificationRequest(makeRequest());
+
+    discoveryService.initialize({ createVerification }, null);
+    await discoveryService.approveSuggestion(request.id, 'admin');
+
+    expect(createVerification).toHaveBeenCalledWith(
+      expect.objectContaining({ wallet_address: '' })
+    );
+  });
 });

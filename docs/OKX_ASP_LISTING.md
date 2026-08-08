@@ -157,13 +157,23 @@ ERC-8004 reputation submission; without it that step is skipped.
 
 A reviewer looking at the example receipt will see `onchain_status:
 "skipped_not_registered"`. That is the honest terminal state for a recipient
-holding no ERC-8004 identity — there is no on-chain agent to attach reputation
-to — and it is what any Nostr-only agent gets. The receipt is still signed,
-IPFS-pinned, and EAS-anchored; only the ERC-8004 leg does not apply.
+with no EVM `wallet_address` and no ERC-8004 identity — there is no on-chain
+agent to attach reputation to, and no wallet reconciliation could ever resolve
+one from — which is what any Nostr-only agent gets. (A recipient who *does*
+supply a wallet but simply isn't registered yet stays non-terminal instead:
+reconciliation keeps retrying, since they may register later.) The receipt is
+still signed, IPFS-pinned, and EAS-anchored regardless; only the ERC-8004 leg
+does not apply.
 
-`wallet_address` is optional and must be an EVM address. It is the recipient of
-the on-chain EAS attestation; a Nostr-only agent can omit it and still receive
-the signed, IPFS-pinned receipt.
+`wallet_address` is optional and must be an EVM address. When present, it is
+the recipient the on-chain EAS attestation names directly. When a Nostr-only
+agent omits it, the receipt still gets an EAS anchor — the attestation is
+recorded with the recipient field set to the zero address
+(`eas.anchor_mode: "unattributed"`) rather than being skipped, so the
+receiptHash, score, and IPFS URI are still independently verifiable on Base
+mainnet at base.easscan.org without trusting Kinetix. Only the *identity* of
+who is being attested to is missing in that case, never the attestation
+itself.
 
 ## Why the status route exists
 

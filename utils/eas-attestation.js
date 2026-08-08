@@ -11,8 +11,14 @@ const easConfig = require('../config/eas/eas-config.json');
 const { createSigner } = require('./signing-key');
 const { resolveNetwork } = require('./network');
 const { canonicalHash } = require('./receipt-canonical');
+const { assertGasWithinCeiling } = require('./gas-guard');
 
 const SCHEMA_STRING = 'string receiptId,bytes32 receiptHash,string verificationType,uint8 score,string ipfsUri';
+
+// Matches the EVM-address test attestation-service.js uses when signing —
+// anything that fails this was already blanked to '' in recipient.wallet_address
+// before it ever reached here.
+const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
 
 const NETWORKS = {
   base_mainnet: {
@@ -94,20 +100,31 @@ class EASAttestationService {
   }
 
   /**
-   * Submit an EAS attestation for a receipt. Requires only the recipient's
-   * wallet address — no ERC-8004 (or any other) registration needed.
+   * Submit an EAS attestation for a receipt. Anchors every receipt
+   * regardless of recipient identity: when recipient.wallet_address is a
+   * real EVM address the attestation names them directly (anchor_mode
+   * "recipient"); when it is absent (Nostr-only or platform-handle-only
+   * agents) the attestation still lands on-chain, addressed to the zero
+   * address (anchor_mode "unattributed") — the receiptHash, score, and
+   * ipfsUri are still independently verifiable on Base either way. No
+   * ERC-8004 (or any other) registration is needed for either mode.
    * @param {Object} receipt - Attestation receipt
-   * @returns {Promise<{uid: string, txHash: string}>}
+   * @returns {Promise<{uid: string, txHash: string, explorerUrl: string, recipient: string, anchorMode: 'recipient'|'unattributed'}>}
    */
   async submitAttestation(receipt) {
     this._ensureInitialized();
 
-    const recipient = receipt.recipient?.wallet_address;
-    if (!recipient) {
-      const err = new Error(`NO_WALLET: recipient "${receipt.recipient?.agent_id}" has no wallet_address for EAS attestation.`);
-      err.code = 'NO_WALLET';
-      throw err;
-    }
+    const rawWallet = receipt.recipient?.wallet_address;
+    const hasRecipient = EVM_ADDRESS.test(rawWallet || '');
+    // ethers.getAddress also normalises to EIP-55 checksum casing — worth
+    // doing here since attestation-service.js stores whatever casing the
+    // caller originally supplied.
+    const recipient = hasRecipient ? ethers.getAddress(rawWallet) : ethers.ZeroAddress;
+    const anchorMode = hasRecipient ? 'recipient' : 'unattributed';
+
+    // Guardrail: refuse to send during a gas spike, same ceiling ERC-8004
+    // submissions use. The raw signing wallet has no SafetyController gating.
+    await assertGasWithinCeiling(this.provider);
 
     // Canonical, reproducible hash (same payload the receipt signature commits
     // to) — not keccak of insertion-order JSON.stringify, which included the
@@ -122,7 +139,7 @@ class EASAttestationService {
       { name: 'ipfsUri', value: receipt.reputation_context?.ipfs_uri || '', type: 'string' }
     ]);
 
-    this._log('Submitting EAS attestation...', { receiptId: receipt.receipt_id, recipient });
+    this._log('Submitting EAS attestation...', { receiptId: receipt.receipt_id, recipient, anchorMode });
 
     const tx = await this.eas.attest({
       schema: this.network.schemaUID,
@@ -141,12 +158,14 @@ class EASAttestationService {
       this._log('WARNING: EAS attestation confirmed but no tx hash on receipt', { uid });
     }
 
-    this._log('EAS attestation submitted', { uid, txHash });
+    this._log('EAS attestation submitted', { uid, txHash, anchorMode });
 
     return {
       uid,
       txHash,
-      explorerUrl: `${this.network.explorer}/attestation/view/${uid}`
+      explorerUrl: `${this.network.explorer}/attestation/view/${uid}`,
+      recipient,
+      anchorMode
     };
   }
 
