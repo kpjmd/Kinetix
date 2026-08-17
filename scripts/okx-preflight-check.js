@@ -280,21 +280,84 @@ async function checkFailureModes() {
     `got ${status.status}${status.status === 402 ? ' (payment middleware over-matched)' : ''}`
   );
 
-  // Malformed body behind the paywall: the payment challenge fires first, so a
-  // 402 here is correct and proves the caller is not charged before validation.
+  // Malformed body behind the paywall: parameter validation now runs before
+  // the 402 challenge is ever built, so this must be a 400, not a 402 — OKX's
+  // ASP review flagged that the previous ordering made buyers sign a payment
+  // authorization before finding out their request was invalid.
   const malformed = await probe('/api/x402/verify/premium', {
     method: 'POST',
     body: JSON.stringify({ ...VALID_PAYLOAD, verification_type: 'fraud' })
   });
   check(
-    'malformed payload is rejected without a 500',
-    malformed.status !== 500,
+    'malformed payload is rejected with 400 before the payment challenge',
+    malformed.status === 400,
     `got ${malformed.status}`
   );
   check(
     'no internal detail leaked in the error body',
     !/ENOENT|\/app\/|node_modules/.test(malformed.text),
     'response body scanned for paths'
+  );
+}
+
+/**
+ * Parameter validation must complete before the 402 challenge is issued.
+ *
+ * OKX's ASP review rejected this listing because a buyer was made to sign a
+ * payment authorization before the service ever checked whether the request
+ * was valid. This proves the fix across all three paid tiers — basic and
+ * advanced are otherwise untested in this script — by sending a request with
+ * a missing required field and no payment header, and asserting the response
+ * is a plain 400 with no PAYMENT-REQUIRED header and no decodable challenge.
+ */
+async function checkPreValidation() {
+  console.log('\nParameter validation before the payment challenge');
+
+  const basicPayload = { platform: 'clawstr', platform_handle: VALID_PAYLOAD.platform_handle }; // missing agent_id
+  const advancedPayload = {
+    commitment_description: VALID_PAYLOAD.commitment_description,
+    platform: 'clawstr',
+    platform_handle: VALID_PAYLOAD.platform_handle,
+    criteria: { duration_days: 7, frequency: 'daily' }
+  }; // missing agent_id
+  const { agent_id, ...premiumPayload } = VALID_PAYLOAD; // missing agent_id
+
+  const cases = [
+    { path: '/api/x402/verify/basic', payload: basicPayload, label: 'basic' },
+    { path: '/api/x402/verify/advanced', payload: advancedPayload, label: 'advanced' },
+    { path: '/api/x402/verify/premium', payload: premiumPayload, label: 'premium' }
+  ];
+
+  for (const { path, payload, label } of cases) {
+    const res = await probe(path, { method: 'POST', body: JSON.stringify(payload) });
+    check(`${label}: missing agent_id returns 400, not 402`, res.status === 400, `got ${res.status}`);
+    check(
+      `${label}: no PAYMENT-REQUIRED header on a rejected request`,
+      !res.paymentRequired,
+      res.paymentRequired ? 'header present — the challenge fired before validation' : ''
+    );
+    check(
+      `${label}: no payment challenge in the response body`,
+      decodeChallenge(res) === null,
+      'accepts[] should be absent on a 400'
+    );
+  }
+
+  // A payload that only fails the deeper commitment-shape check (not merely a
+  // missing field) must also be rejected before the challenge.
+  const deepInvalid = await probe('/api/x402/verify/premium', {
+    method: 'POST',
+    body: JSON.stringify({ ...VALID_PAYLOAD, verification_type: 'fraud' })
+  });
+  check(
+    'premium: invalid verification_type returns 400, not 402',
+    deepInvalid.status === 400,
+    `got ${deepInvalid.status}`
+  );
+  check(
+    'premium: no PAYMENT-REQUIRED header for a deep-validation rejection',
+    !deepInvalid.paymentRequired,
+    deepInvalid.paymentRequired ? 'header present — the challenge fired before validation' : ''
   );
 }
 
@@ -305,6 +368,7 @@ async function main() {
   await checkPaymentChallenge();
   await checkAgentContentNegotiation();
   await checkFailureModes();
+  await checkPreValidation();
 
   const failed = results.filter(r => !r.passed);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

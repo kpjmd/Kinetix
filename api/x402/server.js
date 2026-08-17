@@ -18,6 +18,7 @@ const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
 const { createRateLimiter } = require('../../utils/rate-limiter');
 const { resolveMonitoringTarget, SUPPORTED_PLATFORMS } = require('../../utils/monitoring-target');
+const { ValidationError } = require('../../utils/validation-error');
 const clawstrApi = require('../../utils/clawstr-api');
 
 const app = express();
@@ -390,6 +391,158 @@ if (PRODUCTION) {
   }
 }
 
+// --- Pre-payment parameter validation --------------------------------------
+//
+// OKX AI's ASP review flagged that this service only surfaced bad-parameter
+// errors after the buyer had already signed a payment authorization: the x402
+// middleware below issues its 402 challenge purely from a path+method match,
+// with no visibility into the request body, so a malformed request used to
+// sail through the full challenge/sign/resubmit round trip before a route
+// handler's own checks rejected it. These three builders run the same
+// validation and commitment construction each handler used to do inline, and
+// are wired in as `app.post` handlers *before* the payment middleware is
+// mounted below, so Express dispatches them first and a bad request never
+// reaches the point where a 402 is issued. The real handlers further down
+// reuse the already-validated commitment via `req.builtCommitment`.
+
+function buildBasicCommitment(body) {
+  const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id, wallet_address } = body;
+
+  if (!agent_id || !platform || !platform_handle) {
+    throw new ValidationError('Missing required fields', {
+      error: 'Missing required fields',
+      required: ['agent_id', 'platform', 'platform_handle']
+    });
+  }
+
+  // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+  const target = resolveMonitoringTarget({ platform, platform_handle });
+
+  const commitment = {
+    agent_id,
+    platform_profiles: target.platform_profiles,
+    pubkey: target.pubkey,
+    wallet_address,
+    description: commitment_description || `Basic verification for ${agent_id}`,
+    verification_type: 'consistency',
+    criteria: {
+      platform: target.platform,
+      frequency: 'daily',
+      duration_days: pricingConfig.tiers.basic.max_duration_days,
+      // Derived, not 1: a hardcoded 1 over a 7-day daily window meant a single
+      // post scored 100% completion and sold a `verified` receipt.
+      minimum_actions: deriveMinimumActions({
+        frequency: 'daily',
+        duration_days: pricingConfig.tiers.basic.max_duration_days
+      })
+    },
+    erc8004_token_id: erc8004_token_id || null
+  };
+
+  verificationService._validateCommitment(commitment);
+  return commitment;
+}
+
+function buildAdvancedCommitment(body) {
+  const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id, wallet_address } = body;
+
+  if (!agent_id || !commitment_description || !criteria) {
+    throw new ValidationError('Missing required fields', {
+      error: 'Missing required fields',
+      required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
+    });
+  }
+
+  // Checked before the spread below, which would otherwise turn a string
+  // into {0:'a',1:'b',...} and hide the bad input from the service layer.
+  if (typeof criteria !== 'object' || Array.isArray(criteria)) {
+    throw new ValidationError('criteria must be an object');
+  }
+
+  // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+  const target = resolveMonitoringTarget({ platform, platform_handle });
+
+  const commitment = {
+    agent_id,
+    platform_profiles: target.platform_profiles,
+    pubkey: target.pubkey,
+    wallet_address,
+    description: commitment_description,
+    verification_type: criteria.verification_type || 'consistency',
+    criteria: buildCriteria(criteria, {
+      frequency: criteria.frequency || 'daily',
+      platform: target.platform,
+      // Clamp last: spreading `criteria` after this would let a caller's raw
+      // duration_days overwrite the cap and buy a 90-day window at tier price.
+      duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days)
+    }),
+    erc8004_token_id: erc8004_token_id || null
+  };
+
+  verificationService._validateCommitment(commitment);
+  return commitment;
+}
+
+function buildPremiumCommitment(body) {
+  const {
+    agent_id, commitment_description, criteria, verification_type,
+    platform, platform_handle, erc8004_token_id, wallet_address
+  } = body;
+
+  if (!agent_id || !commitment_description || !criteria) {
+    throw new ValidationError('Missing required fields', {
+      error: 'Missing required fields',
+      required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
+    });
+  }
+
+  // Checked before the spread below, which would otherwise turn a string
+  // into {0:'a',1:'b',...} and hide the bad input from the service layer.
+  if (typeof criteria !== 'object' || Array.isArray(criteria)) {
+    throw new ValidationError('criteria must be an object');
+  }
+
+  // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
+  const target = resolveMonitoringTarget({ platform, platform_handle });
+
+  const commitment = {
+    agent_id,
+    platform_profiles: target.platform_profiles,
+    pubkey: target.pubkey,
+    wallet_address,
+    description: commitment_description,
+    verification_type: verification_type || 'consistency',
+    criteria: buildCriteria(criteria, {
+      platform: target.platform,
+      // Clamp last: spreading `criteria` after this would let a caller's raw
+      // duration_days overwrite the cap and buy a 10-year window at tier price.
+      duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days)
+    }),
+    erc8004_token_id: erc8004_token_id || null
+  };
+
+  verificationService._validateCommitment(commitment);
+  return commitment;
+}
+
+// Builds and validates the commitment, or sends the appropriate 400/500 and
+// stops the chain — either way, nothing downstream (the payment middleware
+// included) ever sees an invalid request.
+function validateAndBuild(tier, builder) {
+  return (req, res, next) => {
+    try {
+      req.builtCommitment = builder(req.body);
+      next();
+    } catch (error) {
+      sendVerificationError(res, tier, error);
+    }
+  };
+}
+
+app.post('/api/x402/verify/basic', validateAndBuild('Basic', buildBasicCommitment));
+app.post('/api/x402/verify/advanced', validateAndBuild('Advanced', buildAdvancedCommitment));
+app.post('/api/x402/verify/premium', validateAndBuild('Premium', buildPremiumCommitment));
+
 if (!TEST_MODE) {
   // Apply x402 payment middleware (production mode)
   app.use(
@@ -485,6 +638,10 @@ function createPaymentMetadata(tier, req) {
  * and internal endpoints to an anonymous caller.
  */
 function sendVerificationError(res, tier, error) {
+  if (error.responseBody) {
+    console.warn(`${tier} verification rejected: ${error.message}`);
+    return res.status(error.status || 400).json(error.responseBody);
+  }
   if (error.status === 400) {
     console.warn(`${tier} verification rejected: ${error.message}`);
     return res.status(400).json({ error: 'Invalid request', details: error.message });
@@ -506,46 +663,17 @@ function buildCriteria(callerCriteria, overrides) {
   return { ...callerCriteria, ...overrides };
 }
 
-// Basic verification endpoint
+// Basic verification endpoint. Parameter validation already ran, before the
+// payment middleware above, in the `validateAndBuild('Basic', ...)` handler
+// registered earlier for this same route — `req.builtCommitment` is always
+// set by the time this runs.
 app.post('/api/x402/verify/basic', async (req, res) => {
   try {
-    const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id, wallet_address } = req.body;
-
-    if (!agent_id || !platform || !platform_handle) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['agent_id', 'platform', 'platform_handle']
-      });
-    }
-
-    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
-    const target = resolveMonitoringTarget({ platform, platform_handle });
+    const commitment = req.builtCommitment;
 
     // Extract payment metadata from x402 headers
     const paymentMetadata = createPaymentMetadata('basic', req);
-
-    // Create commitment
-    const commitment = {
-      agent_id,
-      platform_profiles: target.platform_profiles,
-      pubkey: target.pubkey,
-      wallet_address,
-      description: commitment_description || `Basic verification for ${agent_id}`,
-      verification_type: 'consistency',
-      criteria: {
-        platform: target.platform,
-        frequency: 'daily',
-        duration_days: pricingConfig.tiers.basic.max_duration_days,
-        // Derived, not 1: a hardcoded 1 over a 7-day daily window meant a single
-        // post scored 100% completion and sold a `verified` receipt.
-        minimum_actions: deriveMinimumActions({
-          frequency: 'daily',
-          duration_days: pricingConfig.tiers.basic.max_duration_days
-        })
-      },
-      payment: paymentMetadata,
-      erc8004_token_id: erc8004_token_id || null
-    };
+    commitment.payment = paymentMetadata;
 
     const verification = await verificationService.createVerification(commitment);
 
@@ -574,48 +702,17 @@ app.post('/api/x402/verify/basic', async (req, res) => {
   }
 });
 
-// Advanced verification endpoint
+// Advanced verification endpoint. Parameter validation already ran, before
+// the payment middleware above, in the `validateAndBuild('Advanced', ...)`
+// handler registered earlier for this same route — `req.builtCommitment` is
+// always set by the time this runs.
 app.post('/api/x402/verify/advanced', async (req, res) => {
   try {
-    const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id, wallet_address } = req.body;
-
-    if (!agent_id || !commitment_description || !criteria) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
-      });
-    }
-
-    // Checked before the spread below, which would otherwise turn a string
-    // into {0:'a',1:'b',...} and hide the bad input from the service layer.
-    if (typeof criteria !== 'object' || Array.isArray(criteria)) {
-      return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
-    }
-
-    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
-    const target = resolveMonitoringTarget({ platform, platform_handle });
+    const commitment = req.builtCommitment;
 
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('advanced', req);
-
-    // Create commitment with monitoring
-    const commitment = {
-      agent_id,
-      platform_profiles: target.platform_profiles,
-      pubkey: target.pubkey,
-      wallet_address,
-      description: commitment_description,
-      verification_type: criteria.verification_type || 'consistency',
-      criteria: buildCriteria(criteria, {
-        frequency: criteria.frequency || 'daily',
-        platform: target.platform,
-        // Clamp last: spreading `criteria` after this would let a caller's raw
-        // duration_days overwrite the cap and buy a 90-day window at tier price.
-        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.advanced.max_duration_days)
-      }),
-      payment: paymentMetadata,
-      erc8004_token_id: erc8004_token_id || null
-    };
+    commitment.payment = paymentMetadata;
 
     const verification = await verificationService.createVerification(commitment);
 
@@ -644,50 +741,17 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
   }
 });
 
-// Premium verification endpoint
+// Premium verification endpoint. Parameter validation already ran, before
+// the payment middleware above, in the `validateAndBuild('Premium', ...)`
+// handler registered earlier for this same route — `req.builtCommitment` is
+// always set by the time this runs.
 app.post('/api/x402/verify/premium', async (req, res) => {
   try {
-    const {
-      agent_id, commitment_description, criteria, verification_type,
-      platform, platform_handle, erc8004_token_id, wallet_address
-    } = req.body;
-
-    if (!agent_id || !commitment_description || !criteria) {
-      return res.status(400).json({
-        error: 'Missing required fields',
-        required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
-      });
-    }
-
-    // Checked before the spread below, which would otherwise turn a string
-    // into {0:'a',1:'b',...} and hide the bad input from the service layer.
-    if (typeof criteria !== 'object' || Array.isArray(criteria)) {
-      return res.status(400).json({ error: 'Invalid request', details: 'criteria must be an object' });
-    }
-
-    // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
-    const target = resolveMonitoringTarget({ platform, platform_handle });
+    const commitment = req.builtCommitment;
 
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('premium', req);
-
-    // Create premium commitment (supports all verification types)
-    const commitment = {
-      agent_id,
-      platform_profiles: target.platform_profiles,
-      pubkey: target.pubkey,
-      wallet_address,
-      description: commitment_description,
-      verification_type: verification_type || 'consistency',
-      criteria: buildCriteria(criteria, {
-        platform: target.platform,
-        // Clamp last: spreading `criteria` after this would let a caller's raw
-        // duration_days overwrite the cap and buy a 10-year window at tier price.
-        duration_days: Math.min(criteria.duration_days || 7, pricingConfig.tiers.premium.max_duration_days)
-      }),
-      payment: paymentMetadata,
-      erc8004_token_id: erc8004_token_id || null
-    };
+    commitment.payment = paymentMetadata;
 
     const verification = await verificationService.createVerification(commitment);
 

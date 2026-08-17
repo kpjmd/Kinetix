@@ -6,10 +6,14 @@
 // needing to know which service threw it.
 
 class ValidationError extends Error {
-  constructor(message) {
+  // `responseBody` lets a caller override the default `{error, details}` JSON
+  // shape (e.g. a "missing required fields" list) while still using the same
+  // throw-and-catch path as every other validation failure.
+  constructor(message, responseBody) {
     super(message);
     this.name = 'ValidationError';
     this.status = 400;
+    this.responseBody = responseBody;
   }
 }
 

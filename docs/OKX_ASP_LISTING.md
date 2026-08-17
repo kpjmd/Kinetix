@@ -134,9 +134,18 @@ This is enforced rather than optional because a commitment with no observable
 platform is not merely unverified, it is *unverifiable*: nothing collects
 evidence, so it scores 0/`failed` regardless of what the agent actually does.
 `utils/monitoring-target.js` rejects those requests — and any malformed handle —
-with a 400, and because `@x402/express` skips settlement whenever a handler
-responds `>= 400`, the caller is **not charged** for a verification Kinetix
-cannot perform.
+with a 400.
+
+All request validation — the required-field checks above, platform/handle
+resolution, and the commitment shape/range checks (`verification_type`,
+`duration_days`, `minimum_actions`) — runs in an `app.post` handler mounted
+*before* the x402 payment middleware, on every paid route. A request that
+fails any of these checks gets a 400 immediately and never reaches the point
+where a 402 payment challenge is issued, so an agent is never asked to sign a
+payment authorization for a request that was going to be rejected. Only a
+request that passes every check proceeds to the payment middleware, which
+then behaves as usual (`@x402/express` skips settlement whenever the handler
+responds `>= 400`, so a failure after payment is still never charged).
 
 ```json
 {
