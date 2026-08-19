@@ -289,6 +289,83 @@ describe('VerificationService', () => {
     });
   });
 
+  // _scoreTimeBound/_scoreQuality read criteria.milestones/quality_metrics/
+  // minimum_samples with no guard — these must be caught here, pre-payment,
+  // or a paying buyer gets a post-payment scoring crash instead of a 400.
+  describe('type-specific criteria validation', () => {
+    it('rejects time_bound with no milestones', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'time_bound',
+        criteria: { duration_days: 30 }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/milestones/);
+    });
+
+    it('rejects time_bound with an empty milestones array', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'time_bound',
+        criteria: { milestones: [] }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/milestones/);
+    });
+
+    it('rejects a milestone missing milestone_id', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'time_bound',
+        criteria: { milestones: [{ deadline: '2026-09-01T00:00:00Z' }] }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/milestone_id/);
+    });
+
+    it('rejects a milestone with an unparseable deadline', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'time_bound',
+        criteria: { milestones: [{ milestone_id: 'm1', deadline: 'not-a-date' }] }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/deadline/);
+    });
+
+    it('accepts a valid time_bound commitment', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'time_bound',
+        criteria: { milestones: [{ milestone_id: 'm1', deadline: '2026-09-01T00:00:00Z' }] }
+      };
+      expect(() => service._validateCommitment(commitment)).not.toThrow();
+    });
+
+    it('rejects quality with no quality_metrics', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'quality',
+        criteria: { duration_days: 14, minimum_samples: 5 }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/quality_metrics/);
+    });
+
+    it('rejects quality with no minimum_samples', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'quality',
+        criteria: { duration_days: 14, quality_metrics: { response_time_minutes: 30 } }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/minimum_samples/);
+    });
+
+    it('rejects a non-positive minimum_samples', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'quality',
+        criteria: { duration_days: 14, quality_metrics: { response_time_minutes: 30 }, minimum_samples: 0 }
+      };
+      expect(() => service._validateCommitment(commitment)).toThrow(/minimum_samples/);
+    });
+
+    it('accepts a valid quality commitment', () => {
+      const commitment = {
+        agent_id: 'a', description: 'd', verification_type: 'quality',
+        criteria: { duration_days: 14, quality_metrics: { response_time_minutes: 30 }, minimum_samples: 5 }
+      };
+      expect(() => service._validateCommitment(commitment)).not.toThrow();
+    });
+  });
+
   describe('_calculateTimeliness', () => {
     it('is unaffected by the order evidence was appended in', () => {
       // Each collection run re-queries the whole window and appends, so the

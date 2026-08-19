@@ -315,6 +315,67 @@ describe('x402 verification server', () => {
         expect(res.body.details).toBeUndefined();
       }
     });
+
+    it('rejects verification_type "time_bound" with no milestones before payment (OKX round-6 regression)', async () => {
+      // This exact combination was the discovery example's own default
+      // (criteria: { duration_days: 30 }, verification_type: 'time_bound')
+      // until this fix — it passed payment and crashed at scoring, unguarded
+      // by _validateCommitment. Must now 400 before a 402 is ever issued.
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, verification_type: 'time_bound', criteria: { duration_days: 30 } });
+
+      expect(res.status).toBe(400);
+      expect(res.headers['payment-required']).toBeUndefined();
+    });
+
+    it('rejects verification_type "quality" with no quality_metrics/minimum_samples before payment', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, verification_type: 'quality', criteria: { duration_days: 14 } });
+
+      expect(res.status).toBe(400);
+      expect(res.headers['payment-required']).toBeUndefined();
+    });
+
+    it('accepts a valid time_bound request', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({
+          ...validPayload,
+          verification_type: 'time_bound',
+          criteria: { milestones: [{ milestone_id: 'm1', deadline: '2026-09-01T00:00:00Z' }] }
+        });
+
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe('POST /api/x402/verify/advanced', () => {
+    it('rejects verification_type "quality" with no quality_metrics/minimum_samples before payment', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/advanced')
+        .send({ ...validPayload, criteria: { verification_type: 'quality', duration_days: 14 } });
+
+      expect(res.status).toBe(400);
+      expect(res.headers['payment-required']).toBeUndefined();
+    });
+
+    it('accepts a valid quality request', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/advanced')
+        .send({
+          ...validPayload,
+          criteria: {
+            verification_type: 'quality',
+            duration_days: 14,
+            quality_metrics: { response_time_minutes: 30 },
+            minimum_samples: 5
+          }
+        });
+
+      expect(res.status).toBe(200);
+    });
   });
 
   describe('POST /api/x402/verify/basic', () => {

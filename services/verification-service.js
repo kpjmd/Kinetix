@@ -1003,6 +1003,40 @@ class VerificationService {
     if (typeof commitment.criteria !== 'object' || Array.isArray(commitment.criteria)) {
       throw new ValidationError('criteria must be an object');
     }
+    // _scoreTimeBound does `criteria.milestones.forEach(...)` with no guard —
+    // an absent or empty array must be caught here, before payment, not
+    // surfaced as a scoring-time crash after the buyer already paid.
+    if (commitment.verification_type === 'time_bound') {
+      const milestones = commitment.criteria.milestones;
+      if (!Array.isArray(milestones) || milestones.length === 0) {
+        throw new ValidationError('criteria.milestones is required and must be a non-empty array for verification_type "time_bound"');
+      }
+      milestones.forEach((m, i) => {
+        if (!m || typeof m !== 'object') {
+          throw new ValidationError(`criteria.milestones[${i}] must be an object`);
+        }
+        if (!m.milestone_id) {
+          throw new ValidationError(`criteria.milestones[${i}].milestone_id is required`);
+        }
+        if (!m.deadline || isNaN(Date.parse(m.deadline))) {
+          throw new ValidationError(`criteria.milestones[${i}].deadline must be a valid ISO 8601 date string`);
+        }
+      });
+    }
+    // _scoreQuality reads criteria.quality_metrics and criteria.minimum_samples
+    // directly, unguarded — same reasoning as time_bound above.
+    if (commitment.verification_type === 'quality') {
+      if (!commitment.criteria.quality_metrics || typeof commitment.criteria.quality_metrics !== 'object') {
+        throw new ValidationError('criteria.quality_metrics is required and must be an object for verification_type "quality"');
+      }
+      if (commitment.criteria.minimum_samples === undefined) {
+        throw new ValidationError('criteria.minimum_samples is required for verification_type "quality"');
+      }
+      const samples = Number(commitment.criteria.minimum_samples);
+      if (!Number.isInteger(samples) || samples <= 0) {
+        throw new ValidationError('criteria.minimum_samples must be a positive integer');
+      }
+    }
     // Guarded here rather than at the callers: a non-numeric duration reaches
     // `new Date(NaN).toISOString()` in createVerification and throws a
     // RangeError, and a negative one silently yields an end_date in the past.
