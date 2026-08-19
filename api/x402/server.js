@@ -255,10 +255,63 @@ const advancedDiscovery = declareDiscoveryExtension({
       },
       criteria: {
         type: 'object',
+        description:
+          "Shape depends on verification_type. 'consistency' uses frequency/duration_days/minimum_actions/" +
+          "action_type/content_requirements. 'quality' uses duration_days/quality_metrics/minimum_samples. " +
+          'Advanced supports consistency and quality only — use the premium tier for time_bound.',
         properties: {
-          verification_type: { type: 'string', enum: ['consistency', 'quality'] },
-          duration_days: { type: 'number', minimum: 1, maximum: 30 },
-          frequency: { type: 'string', enum: ['daily', 'weekly'] }
+          verification_type: {
+            type: 'string',
+            enum: ['consistency', 'quality'],
+            description: 'Which scoring model to apply. Determines which of the fields below are required.'
+          },
+          duration_days: {
+            type: 'number',
+            minimum: 1,
+            maximum: 30,
+            description: 'Length of the monitoring window in days. Used by both consistency and quality.'
+          },
+          frequency: {
+            type: 'string',
+            enum: ['daily', 'weekly'],
+            description: "consistency only. How often the agent is expected to act. Defaults to 'daily' if omitted."
+          },
+          minimum_actions: {
+            type: 'number',
+            description:
+              'consistency only, optional. Number of qualifying actions required in the window. If omitted, ' +
+              'derived from duration_days and frequency (e.g. 14 daily days -> 14).'
+          },
+          action_type: {
+            type: 'string',
+            description: "consistency/quality, optional. Type of action counted as evidence. Defaults to 'post'."
+          },
+          content_requirements: {
+            type: 'object',
+            description: 'consistency only, optional.',
+            properties: {
+              min_length: { type: 'number', description: 'Minimum character length of each qualifying post.' },
+              required_tags: { type: 'array', items: { type: 'string' }, description: 'Tags every qualifying post must include.' },
+              forbidden_content: { type: 'array', items: { type: 'string' }, description: 'Strings that disqualify a post if present.' }
+            }
+          },
+          quality_metrics: {
+            type: 'object',
+            description: 'Required when verification_type is "quality". At least one sub-field should be set.',
+            properties: {
+              response_time_minutes: { type: 'number', description: 'Max minutes from prompt to response to count as on-time.' },
+              minimum_length: { type: 'number', description: 'Minimum response length, in characters.' },
+              required_format: { type: 'string', description: 'Exact format each response must match, e.g. "markdown".' },
+              satisfaction_threshold: { type: 'number', description: 'Minimum average satisfaction rating (1-5) evidence must report.' },
+              technical_accuracy: { type: 'boolean', description: 'Whether each response must be flagged accuracy_verified in evidence.' }
+            }
+          },
+          minimum_samples: {
+            type: 'number',
+            description:
+              'Required when verification_type is "quality". Minimum number of evidence samples needed to score; ' +
+              'fewer samples than this yields status "failed".'
+          }
         },
         required: ['verification_type', 'duration_days']
       }
@@ -280,11 +333,28 @@ const premiumDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
     agent_id: "example-agent-123",
-    commitment_description: "Full verification suite",
+    commitment_description: "Ship v2 API by three milestone deadlines",
     platform: "clawstr",
     platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
-    criteria: { duration_days: 30 },
-    verification_type: "time_bound"
+    verification_type: "time_bound",
+    criteria: {
+      milestones: [
+        {
+          milestone_id: "design_spec",
+          description: "Design spec published",
+          deadline: "2026-09-01T00:00:00Z",
+          grace_period_hours: 12
+        },
+        {
+          milestone_id: "beta_deploy",
+          description: "Beta deployed",
+          deadline: "2026-09-15T00:00:00Z",
+          grace_period_hours: 12
+        }
+      ],
+      allow_early_completion: true,
+      penalty_per_late_hour: 1
+    }
   },
   inputSchema: {
     type: 'object',
@@ -311,10 +381,80 @@ const premiumDiscovery = declareDiscoveryExtension({
       },
       criteria: {
         type: 'object',
+        description:
+          'Shape depends on the sibling verification_type field. consistency uses frequency/duration_days/' +
+          'minimum_actions/action_type/content_requirements. quality uses duration_days/quality_metrics/' +
+          'minimum_samples. time_bound uses milestones/allow_early_completion/penalty_per_late_hour ' +
+          '(duration_days is not used by time_bound scoring).',
         properties: {
-          duration_days: { type: 'number', minimum: 1, maximum: 90 }
+          duration_days: {
+            type: 'number',
+            minimum: 1,
+            maximum: 90,
+            description: 'Length of the monitoring window in days. Used by consistency and quality; ignored for time_bound.'
+          },
+          frequency: {
+            type: 'string',
+            enum: ['daily', 'weekly'],
+            description: "consistency only. Defaults to 'daily' if omitted."
+          },
+          minimum_actions: {
+            type: 'number',
+            description: 'consistency only, optional. Derived from duration_days/frequency if omitted.'
+          },
+          action_type: {
+            type: 'string',
+            description: "consistency/quality, optional. Type of action counted as evidence. Defaults to 'post'."
+          },
+          content_requirements: {
+            type: 'object',
+            description: 'consistency only, optional.',
+            properties: {
+              min_length: { type: 'number' },
+              required_tags: { type: 'array', items: { type: 'string' } },
+              forbidden_content: { type: 'array', items: { type: 'string' } }
+            }
+          },
+          quality_metrics: {
+            type: 'object',
+            description: 'Required when verification_type is "quality".',
+            properties: {
+              response_time_minutes: { type: 'number' },
+              minimum_length: { type: 'number' },
+              required_format: { type: 'string' },
+              satisfaction_threshold: { type: 'number' },
+              technical_accuracy: { type: 'boolean' }
+            }
+          },
+          minimum_samples: {
+            type: 'number',
+            description: 'Required when verification_type is "quality".'
+          },
+          milestones: {
+            type: 'array',
+            description: 'Required when verification_type is "time_bound". Non-empty; each item is one deliverable deadline.',
+            items: {
+              type: 'object',
+              properties: {
+                milestone_id: { type: 'string', description: 'Caller-chosen identifier matching this milestone to evidence.' },
+                description: { type: 'string' },
+                deadline: { type: 'string', format: 'date-time', description: 'ISO 8601 timestamp, e.g. "2026-09-01T00:00:00Z".' },
+                required_deliverable: { type: 'string' },
+                grace_period_hours: { type: 'number', description: 'Hours past deadline before lateness penalties start. Default 0.' }
+              },
+              required: ['milestone_id', 'deadline']
+            }
+          },
+          allow_early_completion: {
+            type: 'boolean',
+            description: 'time_bound only, optional. Whether early delivery earns a score bonus. Default true.'
+          },
+          penalty_per_late_hour: {
+            type: 'number',
+            description: 'time_bound only, optional. Score points deducted per hour late, past the grace period. Default 1.'
+          }
         },
-        required: ['duration_days']
+        required: []
       }
     },
     required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']

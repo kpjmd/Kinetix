@@ -361,6 +361,92 @@ async function checkPreValidation() {
   );
 }
 
+/**
+ * `criteria` is polymorphic — its real shape depends on verification_type
+ * (consistency/quality/time_bound) — but the Bazaar discovery schema only
+ * ever documented the consistency shape. OKX's ASP review rejected this
+ * listing ("a parameter that cannot be specifically inferred") because an
+ * agent reading the schema had no way to learn what quality/time_bound need.
+ * Worse, the premium discovery EXAMPLE set verification_type: "time_bound"
+ * with criteria: { duration_days: 30 } — no milestones — which crashes
+ * _scoreTimeBound at scoring time if anyone actually used it. This check
+ * asserts every field each scoring path reads is documented, and that the
+ * example itself is one that would actually work.
+ */
+async function checkCriteriaSchemaCompleteness() {
+  console.log('\ncriteria schema completeness (OKX round-6 regression)');
+
+  const premiumRes = await probe('/api/x402/verify/premium', {
+    method: 'POST',
+    body: JSON.stringify(VALID_PAYLOAD)
+  });
+  const advancedRes = await probe('/api/x402/verify/advanced', {
+    method: 'POST',
+    body: JSON.stringify(VALID_PAYLOAD)
+  });
+
+  const premiumChallenge = decodeChallenge(premiumRes);
+  const advancedChallenge = decodeChallenge(advancedRes);
+
+  const criteriaProps = challenge =>
+    challenge?.extensions?.bazaar?.schema
+      ?.properties?.input?.properties?.body?.properties?.criteria?.properties;
+
+  const premiumCriteria = criteriaProps(premiumChallenge);
+  const advancedCriteria = criteriaProps(advancedChallenge);
+
+  const PREMIUM_EXPECTED_FIELDS = [
+    'duration_days', 'frequency', 'minimum_actions', 'action_type', 'content_requirements',
+    'quality_metrics', 'minimum_samples', 'milestones', 'allow_early_completion', 'penalty_per_late_hour'
+  ];
+  const ADVANCED_EXPECTED_FIELDS = [
+    'verification_type', 'duration_days', 'frequency', 'minimum_actions', 'action_type',
+    'content_requirements', 'quality_metrics', 'minimum_samples'
+  ];
+
+  if (premiumCriteria) {
+    const missing = PREMIUM_EXPECTED_FIELDS.filter(f => !(f in premiumCriteria));
+    check(
+      'premium criteria schema documents every field scoring reads',
+      missing.length === 0,
+      missing.length ? `missing: ${missing.join(', ')}` : ''
+    );
+  } else {
+    check('premium criteria schema documents every field scoring reads', false, 'could not read premium criteria schema');
+  }
+
+  if (advancedCriteria) {
+    const missing = ADVANCED_EXPECTED_FIELDS.filter(f => !(f in advancedCriteria));
+    check(
+      'advanced criteria schema documents every field scoring reads',
+      missing.length === 0,
+      missing.length ? `missing: ${missing.join(', ')}` : ''
+    );
+  } else {
+    check('advanced criteria schema documents every field scoring reads', false, 'could not read advanced criteria schema');
+  }
+
+  // The example itself must be one that would actually work, not merely one
+  // the schema happens to allow — this is exactly what broke before.
+  const premiumExampleBody = premiumChallenge?.extensions?.bazaar?.info?.input?.body;
+  if (premiumExampleBody?.verification_type === 'time_bound') {
+    const milestones = premiumExampleBody.criteria?.milestones;
+    const valid = Array.isArray(milestones) && milestones.length > 0 &&
+      milestones.every(m => m && typeof m === 'object' && m.milestone_id && m.deadline);
+    check(
+      'premium discovery example (verification_type: time_bound) has a non-empty, well-formed milestones array',
+      valid,
+      valid ? '' : `criteria.milestones=${JSON.stringify(milestones)}`
+    );
+  } else {
+    check(
+      'premium discovery example (verification_type: time_bound) has a non-empty, well-formed milestones array',
+      false,
+      `expected the example to use verification_type "time_bound", got ${premiumExampleBody?.verification_type}`
+    );
+  }
+}
+
 async function main() {
   console.log(`\nOKX preflight check against ${baseUrl}`);
 
@@ -369,6 +455,7 @@ async function main() {
   await checkAgentContentNegotiation();
   await checkFailureModes();
   await checkPreValidation();
+  await checkCriteriaSchemaCompleteness();
 
   const failed = results.filter(r => !r.passed);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
