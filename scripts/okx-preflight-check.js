@@ -48,6 +48,16 @@ const VALID_PAYLOAD = {
   criteria: { duration_days: 7, frequency: 'daily', minimum_actions: 7 }
 };
 
+// All three paid tiers. Historically only premium was probed here, which is
+// part of why a GET-404 on every one of them went unnoticed for seven review
+// rounds — premium is the tier registered with OKX, but the others share its
+// wiring and regress together.
+const TIERS = [
+  { path: '/api/x402/verify/basic', label: 'basic' },
+  { path: '/api/x402/verify/advanced', label: 'advanced' },
+  { path: '/api/x402/verify/premium', label: 'premium' }
+];
+
 const results = [];
 
 function check(name, passed, detail) {
@@ -438,13 +448,105 @@ async function checkCriteriaSchemaCompleteness() {
       valid,
       valid ? '' : `criteria.milestones=${JSON.stringify(milestones)}`
     );
-  } else {
+  }
+}
+
+/**
+ * The advertised usage example must actually be accepted by the service.
+ *
+ * Twice now the documented example has been one the service itself would
+ * reject: it named a platform its own schema forbade, and later it declared
+ * verification_type "time_bound" with no milestones, which crashed scoring.
+ * Rather than assert a hardcoded shape, send the example back and see. A valid
+ * body earns the 402 challenge; an invalid one is rejected pre-payment with a
+ * 400, which is the failure this catches.
+ */
+async function checkAdvertisedExampleIsAccepted() {
+  console.log('\nadvertised example is accepted by the service');
+
+  for (const { path, label } of TIERS) {
+    const challenge = decodeChallenge(await probe(path, { method: 'POST', body: JSON.stringify(VALID_PAYLOAD) }));
+    const example = challenge?.extensions?.bazaar?.info?.input?.body;
+
+    if (!example) {
+      check(`${label}: discovery example is present`, false, 'could not read the example from the challenge');
+      continue;
+    }
+
+    const res = await probe(path, { method: 'POST', body: JSON.stringify(example) });
     check(
-      'premium discovery example (verification_type: time_bound) has a non-empty, well-formed milestones array',
-      false,
-      `expected the example to use verification_type "time_bound", got ${premiumExampleBody?.verification_type}`
+      `${label}: the documented example passes pre-payment validation`,
+      res.status === 402,
+      res.status === 400
+        ? `got 400 — the advertised example would be rejected: ${res.text.slice(0, 160)}`
+        : `got ${res.status}`
     );
   }
+}
+
+/**
+ * A parameterless probe must return the 402 challenge, not a 404 or a 400.
+ *
+ * This is the check that would have caught seven rounds of OKX rejections.
+ * `onchainos agent x402-check --endpoint <url>` and `onchainos payment quote
+ * <url>` probe a registered endpoint with GET; while these routes were
+ * POST-only that GET fell through to Express's 404 and OKX reported "Endpoint
+ * returned HTTP 404 (not 402); not a valid x402 service" — so their stack
+ * could never read the Bazaar schema documenting our parameters. Every probe
+ * shape is covered here because the preflight previously only ever POSTed.
+ */
+async function checkParameterlessProbe() {
+  console.log('\nparameterless probe returns the challenge (OKX round-7 regression)');
+
+  for (const { path, label } of TIERS) {
+    const get = await probe(path, { method: 'GET' });
+    check(
+      `${label}: GET returns 402`,
+      get.status === 402,
+      get.status === 404
+        ? `got 404 — this is what "onchainos agent x402-check" reports as "not a valid x402 service"`
+        : `got ${get.status}`
+    );
+    check(`${label}: GET carries the PAYMENT-REQUIRED header`, !!get.paymentRequired, get.paymentRequired ? '' : 'missing');
+
+    const getChallenge = decodeChallenge(get);
+    check(`${label}: GET challenge decodes`, !!getChallenge, getChallenge ? '' : 'could not decode');
+
+    // A GET must still advertise the POST contract: the verification is
+    // POST-only, and a discovery record keyed {url, method:GET} would be wrong.
+    check(
+      `${label}: GET challenge still advertises method POST`,
+      getChallenge?.extensions?.bazaar?.info?.input?.method === 'POST',
+      `method=${getChallenge?.extensions?.bazaar?.info?.input?.method}`
+    );
+
+    // Identical config object on both verbs, so the two must not differ.
+    const post = await probe(path, { method: 'POST', body: JSON.stringify(VALID_PAYLOAD) });
+    const postChallenge = decodeChallenge(post);
+    check(
+      `${label}: GET and POST challenges declare the same accepts[]`,
+      JSON.stringify(getChallenge?.accepts) === JSON.stringify(postChallenge?.accepts),
+      'GET and POST must quote the same price and networks'
+    );
+
+    // An empty body supplies no parameters, so there is nothing to reject —
+    // it must yield the challenge that documents what to send.
+    const emptyPost = await probe(path, { method: 'POST', body: '{}' });
+    check(`${label}: POST with {} returns 402`, emptyPost.status === 402, `got ${emptyPost.status}`);
+
+    const bodylessPost = await fetch(`${baseUrl}${path}`, { method: 'POST' });
+    check(`${label}: POST with no body at all returns 402`, bodylessPost.status === 402, `got ${bodylessPost.status}`);
+
+    // Negative control: an array carries no keys but is malformed input, and
+    // must keep failing pre-payment rather than being read as a probe.
+    const arrayPost = await probe(path, { method: 'POST', body: '[]' });
+    check(`${label}: POST with [] is still rejected`, arrayPost.status === 400, `got ${arrayPost.status}`);
+  }
+
+  // Trailing slash is a distinct path string; @x402/core normalizes it, and a
+  // probe that adds one must not fall through to a 404.
+  const slash = await probe('/api/x402/verify/premium/', { method: 'GET' });
+  check('premium: GET with a trailing slash returns 402', slash.status === 402, `got ${slash.status}`);
 }
 
 async function main() {
@@ -456,6 +558,8 @@ async function main() {
   await checkFailureModes();
   await checkPreValidation();
   await checkCriteriaSchemaCompleteness();
+  await checkAdvertisedExampleIsAccepted();
+  await checkParameterlessProbe();
 
   const failed = results.filter(r => !r.passed);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

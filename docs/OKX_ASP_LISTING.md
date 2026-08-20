@@ -147,6 +147,53 @@ request that passes every check proceeds to the payment middleware, which
 then behaves as usual (`@x402/express` skips settlement whenever the handler
 responds `>= 400`, so a failure after payment is still never charged).
 
+On premium, `criteria` is **optional** — omit it for a 7-day daily consistency
+check. Choosing `verification_type: "quality"` or `"time_bound"` does make that
+type's sub-fields required (`quality_metrics` + `minimum_samples`, or
+`milestones`), and those are enforced pre-payment too.
+
+## Discovery: a parameterless probe must return the challenge
+
+The paid routes are keyed in `protectedRoutes` under **both `GET` and `POST`**,
+and a `POST` carrying no body (or `{}`) is treated as a probe rather than as
+bad input. Both cases return the 402 challenge, whose `PAYMENT-REQUIRED` header
+carries the Bazaar `inputSchema` documenting every parameter.
+
+This is not cosmetic. OKX AI validates a registered endpoint with
+`onchainos agent x402-check --endpoint <url>` and `onchainos payment quote
+<url>`, both of which probe with **GET**. While these routes were POST-only,
+that GET matched no handler and fell through to Express's HTML 404, and OKX
+reported:
+
+```
+{"valid":false,"statusCode":404,"reason":"Endpoint returned HTTP 404 (not 402); not a valid x402 service."}
+```
+
+so their stack could never read the parameter schema at all — which is what
+their reviewer kept reporting as missing or un-inferable parameter details.
+Rejecting a body-less POST was the same trap in a second form: a client had to
+already know the parameters in order to receive the schema describing them.
+
+Two invariants hold this together, both covered by `npm run okx:preflight`:
+
+- The GET and POST route entries are the **same config object**, so the two
+  challenges cannot drift apart on price or network.
+- The Bazaar declaration always advertises `method: POST`, whichever verb asked
+  for the challenge. The stock extension stamps in the live request's method,
+  so it is wrapped at registration to pin this — otherwise a GET probe would
+  advertise "GET with a JSON body" and a facilitator could index a second
+  discovery row keyed `{same url, method: GET}`.
+
+A GET that somehow arrives paid gets a **405** (`Allow: POST`) with the same
+parameter description, never a 200 — a 2xx there would settle the payment and
+charge for a document.
+
+The 402 body itself (`unpaidResponseBody` per tier) carries `required`, the
+full parameter schema and a worked example, so a human reading the endpoint
+sees them without base64-decoding a header. It deliberately omits an `accepts`
+key, so clients that read the challenge off the body instead of the header are
+unaffected.
+
 ```json
 {
   "agent_id": "example-agent-123",

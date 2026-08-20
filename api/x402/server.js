@@ -177,8 +177,27 @@ registerExactEvmScheme(resourceServer, {
   networks: okxFacilitatorClient ? [x402NetworkName, X_LAYER_NETWORK] : [x402NetworkName]
 });
 
-// Register Bazaar extension for discovery
-resourceServer.registerExtension(bazaarResourceServerExtension);
+// Register Bazaar extension for discovery.
+//
+// Wrapped rather than registered bare: the stock extension stamps the *live
+// request's* method into the discovery declaration, and these resources are
+// now keyed under GET as well as POST (see protectedRoutes) so an unpaid GET
+// probe would otherwise advertise "GET, with a JSON body" and let a
+// facilitator index a second Bazaar row keyed {same url, method: GET}. The
+// verification is POST-only regardless of which verb asked for the challenge,
+// so pin the advertised method to POST. Keeping `key: 'bazaar'` matters —
+// @x402/express checks hasExtension('bazaar') and would re-register the stock
+// extension over this one if the key changed.
+resourceServer.registerExtension({
+  ...bazaarResourceServerExtension,
+  enrichDeclaration: (declaration, context) =>
+    bazaarResourceServerExtension.enrichDeclaration(
+      declaration,
+      context && typeof context === 'object' && 'method' in context
+        ? { ...context, method: 'POST' }
+        : context
+    )
+});
 
 // Bazaar discovery metadata
 const basicDiscovery = declareDiscoveryExtension({
@@ -382,10 +401,12 @@ const premiumDiscovery = declareDiscoveryExtension({
       criteria: {
         type: 'object',
         description:
-          'Shape depends on the sibling verification_type field. consistency uses frequency/duration_days/' +
-          'minimum_actions/action_type/content_requirements. quality uses duration_days/quality_metrics/' +
-          'minimum_samples. time_bound uses milestones/allow_early_completion/penalty_per_late_hour ' +
-          '(duration_days is not used by time_bound scoring).',
+          'Optional. Omit it for a 7-day daily consistency check. When supplied, its shape depends on the ' +
+          'sibling verification_type field. consistency uses frequency/duration_days/' +
+          'minimum_actions/action_type/content_requirements. quality requires quality_metrics and ' +
+          'minimum_samples. time_bound requires milestones, and also takes allow_early_completion/' +
+          'penalty_per_late_hour (duration_days is not used by time_bound scoring). The quality and ' +
+          'time_bound requirements are enforced before payment, so a missing one is a 400, not a charge.',
         properties: {
           duration_days: {
             type: 'number',
@@ -457,7 +478,7 @@ const premiumDiscovery = declareDiscoveryExtension({
         required: []
       }
     },
-    required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
+    required: ['agent_id', 'commitment_description', 'platform', 'platform_handle']
   },
   output: {
     example: {
@@ -471,30 +492,76 @@ const premiumDiscovery = declareDiscoveryExtension({
   }
 });
 
-// Define protected routes with pricing
-const protectedRoutes = {
-  'POST /api/x402/verify/basic': {
-    accepts: buildAccepts(pricingConfig.tiers.basic.price_usdc, KINETIX_WALLET),
-    description: pricingConfig.tiers.basic.description,
-    extensions: {
-      ...basicDiscovery
-    }
-  },
-  'POST /api/x402/verify/advanced': {
-    accepts: buildAccepts(pricingConfig.tiers.advanced.price_usdc, KINETIX_WALLET),
-    description: pricingConfig.tiers.advanced.description,
-    extensions: {
-      ...advancedDiscovery
-    }
-  },
-  'POST /api/x402/verify/premium': {
-    accepts: buildAccepts(pricingConfig.tiers.premium.price_usdc, KINETIX_WALLET),
-    description: pricingConfig.tiers.premium.description,
-    extensions: {
-      ...premiumDiscovery
-    }
-  },
+// The fields a caller must supply per tier. Single source of truth: the 402
+// body advertises it, the GET handler repeats it, and the post-payment guard
+// echoes it when a body never arrived.
+const REQUIRED_BY_TIER = {
+  // criteria is deliberately absent from premium: it is optional and defaults
+  // to a 7-day daily consistency check. See buildPremiumCommitment.
+  basic: ['agent_id', 'platform', 'platform_handle'],
+  advanced: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle'],
+  premium: ['agent_id', 'commitment_description', 'platform', 'platform_handle']
 };
+
+const TIER_DISCOVERY = { basic: basicDiscovery, advanced: advancedDiscovery, premium: premiumDiscovery };
+
+/**
+ * The body served with the 402 challenge.
+ *
+ * x402 v2 puts the challenge in the base64 PAYMENT-REQUIRED header and leaves
+ * the body `{}`, which is fine for an agent client and useless to a human —
+ * an OKX reviewer curling this endpoint saw an empty object. The parameter
+ * details are already assembled for Bazaar discovery, so serve them here too.
+ * Deliberately carries no `accepts` key: clients that fall back to reading the
+ * challenge off the body test for `Array.isArray(body.accepts)`, so this stays
+ * invisible to them and only the header remains authoritative.
+ */
+function tierDescription(tier) {
+  const discovery = TIER_DISCOVERY[tier].bazaar;
+  return {
+    service: 'Kinetix Commitment Verification',
+    tier,
+    price_usdc: pricingConfig.tiers[tier].price_usdc,
+    description: pricingConfig.tiers[tier].description,
+    method: 'POST',
+    content_type: 'application/json',
+    required: REQUIRED_BY_TIER[tier],
+    parameters: discovery.schema.properties.input.properties.body,
+    example_request: discovery.info.input.body,
+    example_response: discovery.info.output.example,
+    payment: 'Pay per the PAYMENT-REQUIRED header, then repeat this request with the payment header.'
+  };
+}
+
+// @x402/core expects `{contentType, body}` here, not a bare body — it reads
+// `unpaidResponse.contentType` straight into the Content-Type header, and an
+// undefined one makes Node throw ERR_HTTP_INVALID_HEADER_VALUE.
+function describeTier(tier) {
+  return () => ({ contentType: 'application/json', body: tierDescription(tier) });
+}
+
+// Define protected routes with pricing.
+//
+// Each tier's config is built once and keyed under BOTH verbs. GET matters:
+// OKX AI's `onchainos agent x402-check` and `payment quote` probe a registered
+// endpoint with GET, and while these routes were POST-only that probe fell
+// past every app.post layer to Express's own 404 — reported back as "Endpoint
+// returned HTTP 404 (not 402); not a valid x402 service", which also meant
+// OKX could never read the Bazaar inputSchema describing our parameters.
+// Sharing one config object (rather than two literals) means the GET and POST
+// challenges cannot drift; @x402/core never mutates a routeConfig.
+const tierRouteConfig = {};
+const protectedRoutes = {};
+for (const tier of Object.keys(TIER_DISCOVERY)) {
+  tierRouteConfig[tier] = {
+    accepts: buildAccepts(pricingConfig.tiers[tier].price_usdc, KINETIX_WALLET),
+    description: pricingConfig.tiers[tier].description,
+    extensions: { ...TIER_DISCOVERY[tier] },
+    unpaidResponseBody: describeTier(tier)
+  };
+  protectedRoutes[`POST /api/x402/verify/${tier}`] = tierRouteConfig[tier];
+  protectedRoutes[`GET /api/x402/verify/${tier}`] = tierRouteConfig[tier];
+}
 
 // Check if we should use test mode (no facilitator validation)
 const TEST_MODE = process.env.X402_TEST_MODE === 'true' || process.env.TESTNET_MODE === 'true';
@@ -625,14 +692,23 @@ function buildAdvancedCommitment(body) {
 
 function buildPremiumCommitment(body) {
   const {
-    agent_id, commitment_description, criteria, verification_type,
+    agent_id, commitment_description, verification_type,
     platform, platform_handle, erc8004_token_id, wallet_address
   } = body;
 
-  if (!agent_id || !commitment_description || !criteria) {
+  // criteria is optional. Requiring it bought nothing: `criteria: {}` already
+  // passed and produced this same fully-defaulted 7-day daily consistency
+  // window, so the only effect was forcing a caller to name a polymorphic
+  // object whose required shape depends on verification_type — the parameter
+  // OKX AI's review called out as one that "cannot be specifically inferred".
+  // A supplied criteria is still validated below, and quality/time_bound still
+  // require their own sub-fields (enforced pre-payment in _validateCommitment).
+  const criteria = body.criteria ?? {};
+
+  if (!agent_id || !commitment_description) {
     throw new ValidationError('Missing required fields', {
       error: 'Missing required fields',
-      required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
+      required: REQUIRED_BY_TIER.premium
     });
   }
 
@@ -665,11 +741,35 @@ function buildPremiumCommitment(body) {
   return commitment;
 }
 
+/**
+ * Whether a request carried no parameters at all — a discovery probe.
+ *
+ * express.json() normalizes an absent body, a zero-length body and a non-JSON
+ * content type all to `{}`, so `{}` is the whole signal. An array is NOT a
+ * probe: `[]` has no keys but is a malformed request and must keep 400ing.
+ */
+function isParameterlessProbe(body) {
+  return body === undefined
+    || body === null
+    || (typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 0);
+}
+
 // Builds and validates the commitment, or sends the appropriate 400/500 and
 // stops the chain — either way, nothing downstream (the payment middleware
 // included) ever sees an invalid request.
 function validateAndBuild(tier, builder) {
   return (req, res, next) => {
+    // A caller who supplied no parameters gets the 402 challenge, which is
+    // what carries the Bazaar schema naming the parameters. Answering 400 here
+    // instead was a chicken-and-egg: you had to already know the parameters to
+    // be told what they are, and it is why OKX AI's discovery probe could
+    // never read this service. Nothing was supplied, so there is nothing to
+    // validate — and a request that DOES carry a body still runs the full
+    // builder below before reaching the payment middleware.
+    if (isParameterlessProbe(req.body)) {
+      req.builtCommitment = undefined;
+      return next();
+    }
     try {
       req.builtCommitment = builder(req.body);
       next();
@@ -677,6 +777,24 @@ function validateAndBuild(tier, builder) {
       sendVerificationError(res, tier, error);
     }
   };
+}
+
+/**
+ * The commitment validateAndBuild prepared, or null after sending a 400.
+ *
+ * Only absent when a body-less probe arrived carrying a payment header. Must
+ * answer 4xx and never 2xx: @x402/express skips settlement when the handler
+ * responds >= 400, so the payer is not charged for a request that performs no
+ * verification.
+ */
+function requireBuiltCommitment(req, res, tier) {
+  if (req.builtCommitment) return req.builtCommitment;
+  sendVerificationError(res, tier, new ValidationError('Missing request body', {
+    error: 'Missing request body',
+    required: REQUIRED_BY_TIER[tier.toLowerCase()],
+    hint: 'Send a JSON body. The PAYMENT-REQUIRED challenge on this endpoint documents every parameter and includes a working example.'
+  }));
+  return null;
 }
 
 app.post('/api/x402/verify/basic', validateAndBuild('Basic', buildBasicCommitment));
@@ -708,6 +826,26 @@ if (!TEST_MODE) {
 } else {
   console.log('⚠ Running in TEST MODE - x402 payment validation disabled');
   console.log('  Set X402_TEST_MODE=false for production use');
+}
+
+// GET on a paid route describes the service; it never performs a verification.
+//
+// Registered AFTER the payment middleware on purpose: in production an unpaid
+// GET is answered by that middleware with the 402 challenge (the reason these
+// routes are keyed under GET at all), and this handler is reached only if a
+// caller actually paid on GET. It must answer 4xx — @x402/express skips
+// settlement when the handler responds >= 400, so a 200 here would charge for
+// a description. In TEST_MODE, where no middleware is mounted, this is what
+// every GET hits, which keeps the route from falling through to Express's
+// HTML 404.
+for (const tier of Object.keys(REQUIRED_BY_TIER)) {
+  app.get(`/api/x402/verify/${tier}`, (req, res) => {
+    res.status(405).set('Allow', 'POST').json({
+      error: 'Method Not Allowed',
+      message: `GET describes this service; POST performs the ${tier} verification.`,
+      ...tierDescription(tier)
+    });
+  });
 }
 
 // Initialize services
@@ -805,11 +943,11 @@ function buildCriteria(callerCriteria, overrides) {
 
 // Basic verification endpoint. Parameter validation already ran, before the
 // payment middleware above, in the `validateAndBuild('Basic', ...)` handler
-// registered earlier for this same route — `req.builtCommitment` is always
-// set by the time this runs.
+// registered earlier for this same route.
 app.post('/api/x402/verify/basic', async (req, res) => {
   try {
-    const commitment = req.builtCommitment;
+    const commitment = requireBuiltCommitment(req, res, 'Basic');
+    if (!commitment) return;
 
     // Extract payment metadata from x402 headers
     const paymentMetadata = createPaymentMetadata('basic', req);
@@ -844,11 +982,11 @@ app.post('/api/x402/verify/basic', async (req, res) => {
 
 // Advanced verification endpoint. Parameter validation already ran, before
 // the payment middleware above, in the `validateAndBuild('Advanced', ...)`
-// handler registered earlier for this same route — `req.builtCommitment` is
-// always set by the time this runs.
+// handler registered earlier for this same route.
 app.post('/api/x402/verify/advanced', async (req, res) => {
   try {
-    const commitment = req.builtCommitment;
+    const commitment = requireBuiltCommitment(req, res, 'Advanced');
+    if (!commitment) return;
 
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('advanced', req);
@@ -883,11 +1021,11 @@ app.post('/api/x402/verify/advanced', async (req, res) => {
 
 // Premium verification endpoint. Parameter validation already ran, before
 // the payment middleware above, in the `validateAndBuild('Premium', ...)`
-// handler registered earlier for this same route — `req.builtCommitment` is
-// always set by the time this runs.
+// handler registered earlier for this same route.
 app.post('/api/x402/verify/premium', async (req, res) => {
   try {
-    const commitment = req.builtCommitment;
+    const commitment = requireBuiltCommitment(req, res, 'Premium');
+    if (!commitment) return;
 
     // Extract payment metadata
     const paymentMetadata = createPaymentMetadata('premium', req);
@@ -950,6 +1088,7 @@ function start() {
         console.log(`  GET  /health                          - Free health check`);
         console.log(`  GET  /api/v1/attestation/:receipt_id  - Free receipt lookup`);
         console.log(`  GET  /api/x402/verify/:id/status      - Free status check`);
+        console.log(`  GET  /api/x402/verify/<tier>          - 402 challenge + parameter schema`);
         console.log(`  POST /api/x402/verify/basic           - $${pricingConfig.tiers.basic.price_usdc} USDC`);
         console.log(`  POST /api/x402/verify/advanced        - $${pricingConfig.tiers.advanced.price_usdc} USDC`);
         console.log(`  POST /api/x402/verify/premium         - $${pricingConfig.tiers.premium.price_usdc} USDC`);
@@ -1016,3 +1155,7 @@ if (require.main === module) {
 module.exports = app;
 module.exports.start = start;
 module.exports.initializeServices = initializeServices;
+// Exported for tests: the route table is the thing that regressed for seven
+// OKX review rounds (GET keys missing), and asserting on it directly catches
+// that in CI rather than only against a live deploy.
+module.exports.protectedRoutes = protectedRoutes;
