@@ -483,4 +483,119 @@ describe('x402 verification server', () => {
       expect(res.body.x402_networks).toEqual(['eip155:196', 'eip155:8453']);
     });
   });
+
+  // OKX AI rejected this listing seven times. The cause was that the paid
+  // routes were registered POST-only, so OKX's own probe
+  // (`onchainos agent x402-check --endpoint …`, which issues a GET) fell past
+  // every handler to Express's HTML 404 and reported "not a valid x402
+  // service" — meaning their stack could never read the Bazaar inputSchema
+  // that documents our parameters.
+  //
+  // These tests run with X402_TEST_MODE=true, so the payment middleware is not
+  // mounted and a 402 cannot be asserted here — scripts/okx-preflight-check.js
+  // covers that against a live deploy. What Jest locks is that the routes
+  // EXIST for these verbs and never fall through to a 404.
+  describe('parameterless probes (OKX discovery)', () => {
+    const tiers = [
+      { tier: 'basic', required: ['agent_id', 'platform', 'platform_handle'] },
+      { tier: 'advanced', required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle'] },
+      { tier: 'premium', required: ['agent_id', 'commitment_description', 'platform', 'platform_handle'] }
+    ];
+
+    it.each(tiers)('GET /$tier is routed, not a 404', async ({ tier, required }) => {
+      const res = await request(server).get(`/api/x402/verify/${tier}`);
+
+      // In production the payment middleware answers this with the 402
+      // challenge first; reaching this handler means TEST_MODE (or a paid GET).
+      expect(res.status).not.toBe(404);
+      expect(res.status).toBe(405);
+      expect(res.headers.allow).toBe('POST');
+      expect(res.body.method).toBe('POST');
+      expect(res.body.required).toEqual(required);
+      // The parameter details a reviewer or buyer agent needs, served inline.
+      expect(res.body.parameters.properties.agent_id).toBeDefined();
+      expect(res.body.example_request.agent_id).toBeTruthy();
+    });
+
+    it.each(tiers)('POST /$tier with no body is treated as a probe, not bad input', async ({ tier, required }) => {
+      // In production this same request never reaches the handler: the payment
+      // middleware answers it with the 402 challenge. Arriving here means it
+      // came in paid, and a 400 keeps @x402/express from settling.
+      const res = await request(server).post(`/api/x402/verify/${tier}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Missing request body');
+      expect(res.body.required).toEqual(required);
+      expect(res.text).not.toMatch(/ENOENT|node_modules/);
+    });
+
+    it.each(tiers)('POST /$tier with {} is treated the same as no body', async ({ tier }) => {
+      const res = await request(server).post(`/api/x402/verify/${tier}`).send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Missing request body');
+    });
+
+    it('rejects an array body rather than treating it as an empty probe', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .set('Content-Type', 'application/json')
+        .send('[]');
+
+      expect(res.status).toBe(400);
+      // Not the probe path: an array carries no keys but is malformed input.
+      expect(res.body.error).not.toBe('Missing request body');
+    });
+
+    it('keys every paid route under both GET and POST, sharing one config', () => {
+      const { protectedRoutes } = server;
+
+      for (const { tier } of tiers) {
+        const post = protectedRoutes[`POST /api/x402/verify/${tier}`];
+        const get = protectedRoutes[`GET /api/x402/verify/${tier}`];
+
+        expect(post).toBeDefined();
+        expect(get).toBeDefined();
+        // Same object reference, so the GET and POST challenges cannot drift.
+        expect(get).toBe(post);
+        expect(get.accepts.some(a => a.network === 'eip155:196')).toBe(true);
+      }
+    });
+  });
+
+  describe('premium criteria is optional', () => {
+    it('defaults an omitted criteria to a 7-day daily consistency window', async () => {
+      // criteria used to be required while `criteria: {}` already produced
+      // exactly this — so the requirement only forced a caller to name a
+      // polymorphic parameter OKX said could not be inferred.
+      const { criteria, verification_type, ...withoutCriteria } = validPayload;
+      const res = await request(server).post('/api/x402/verify/premium').send(withoutCriteria);
+
+      expect(res.status).toBe(200);
+
+      const stored = readCommitment(res.body.commitment_id);
+      expect(stored.verification_type).toBe('consistency');
+      expect(stored.criteria.duration_days).toBe(7);
+      // Derived, not 1: a 1-action target over a 7-day window would sell a
+      // `verified` receipt for a single post.
+      expect(stored.criteria.minimum_actions).toBe(7);
+    });
+
+    it('still rejects a criteria that is present but not an object', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: 'not-an-object' });
+
+      expect(res.status).toBe(400);
+    });
+
+    it('still requires quality/time_bound sub-fields when that type is chosen', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, verification_type: 'time_bound', criteria: undefined });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details).toMatch(/milestones/);
+    });
+  });
 });
