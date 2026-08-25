@@ -1,5 +1,14 @@
 # OKX AI — ASP Listing (Agent-to-MCP)
 
+**Status: LIVE.** Agent #10381 is approved and listed —
+`approvalDisplayStatus: 4`, `"Listed — eligible for task recommendations"`,
+confirmed independently via `onchainos agent search "commitment verification"`
+returning Kinetix with the correct avatar, endpoint and price. Took 9
+submission rounds; see `okx-asp-listing` memory and the round-by-round history
+in `.okx-submission-handoff.md` for what each rejection actually was and how
+it was found — worth reading before touching this listing again, since most
+rounds turned on a real, specific bug rather than a vague "resubmit and hope."
+
 Runbook for listing Kinetix on OKX AI as a verification Agent Service Provider.
 
 Registration is **Agent-to-MCP only**. Agent-to-Agent (negotiated scope, escrow,
