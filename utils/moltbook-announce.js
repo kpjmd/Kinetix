@@ -122,4 +122,4 @@ async function composeAnnouncement(receipt, model) {
   }
 }
 
-module.exports = { announceVerification };
+module.exports = { announceVerification, ANNOUNCE_SUBMOLT };
