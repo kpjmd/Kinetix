@@ -1,5 +1,6 @@
 const moltbookApi = require('./moltbook-api');
 const stateManager = require('./state-manager');
+const { ANNOUNCE_SUBMOLT } = require('./moltbook-announce');
 
 // Define tools for Claude function calling
 const MOLTBOOK_TOOLS = [
@@ -233,13 +234,22 @@ async function executeTool(toolName, input, postingMode) {
         message: 'Comment posted successfully'
       };
 
-    case 'moltbook_post':
+    case 'moltbook_post': {
+      // Claude has no reliable way to know which submolt is actually correct
+      // for Kinetix's own posts, so it tends to default to a generic guess
+      // like 'general' — the one place Moltbook's own posts don't belong and
+      // a signal its spam filter picks up on. Only override that reflexive
+      // default; an explicit, different submolt from the caller still wins.
+      const submolt = (!input.submolt || input.submolt === 'general')
+        ? ANNOUNCE_SUBMOLT
+        : input.submolt;
+
       if (postingMode === 'approval') {
         // Queue for approval
         const postGenerator = require('./post-generator');
         const queued = await postGenerator.createPostForApproval(
           input.content,
-          input.submolt,
+          submolt,
           'nlp_command',
           {
             type: 'post',
@@ -254,14 +264,15 @@ async function executeTool(toolName, input, postingMode) {
         };
       }
       // Autonomous mode - post directly
-      const post = await moltbookApi.createPost(input.submolt, input.title, input.content);
-      console.log(`[NLP Moltbook] Post published via Telegram tool: ${post.id || post.post?.id} in m/${input.submolt}`);
+      const post = await moltbookApi.createPost(submolt, input.title, input.content);
+      console.log(`[NLP Moltbook] Post published via Telegram tool: ${post.id || post.post?.id} in m/${submolt}`);
       return {
         success: true,
         postId: post.id || post.post?.id,
-        submolt: input.submolt,
+        submolt,
         message: 'Post published successfully'
       };
+    }
 
     case 'moltbook_follow':
       await moltbookApi.followAgent(input.agentName);

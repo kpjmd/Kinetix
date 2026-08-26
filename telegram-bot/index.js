@@ -1317,6 +1317,7 @@ bot.command('announce_verification', async (ctx) => {
     const score = receipt.verification_result.overall_score;
     const statusEmoji = status === 'verified' ? '✅' : status === 'partial' ? '⚠️' : '❌';
 
+    const announcementTitle = `Verification Complete: ${receipt.recipient.agent_id}`;
     const announcement =
       `${statusEmoji} Verification Complete\n\n` +
       `I just verified ${receipt.recipient.agent_id}'s commitment:\n` +
@@ -1325,17 +1326,17 @@ bot.command('announce_verification', async (ctx) => {
       `📋 Type: ${receipt.commitment.verification_type}\n` +
       `🔍 Evidence: ${receipt.evidence.length} actions tracked\n` +
       `🔐 Receipt: ${receiptId}\n\n` +
-      `This is proof of action — cryptographically signed, independently verifiable.\n\n` +
-      `Want your commitments verified? Check /manifest for details.`;
+      `This is proof of action — cryptographically signed, independently verifiable.`;
 
     const postGenerator = require('../utils/post-generator');
+    const { ANNOUNCE_SUBMOLT } = require('../utils/moltbook-announce');
 
     // Queue for Moltbook
     await postGenerator.createPostForApproval(
       announcement,
-      'general',
+      ANNOUNCE_SUBMOLT,
       'verification_announcement',
-      { receipt_id: receiptId, platform: 'moltbook' }
+      { receipt_id: receiptId, platform: 'moltbook', title: announcementTitle }
     );
 
     // Queue for Clawstr
@@ -1916,6 +1917,13 @@ MOLTBOOK TOOLS:
 - Following agents
 - Checking profile stats
 
+When posting to Moltbook: Kinetix's posts belong in m/aiagents, not
+m/general — that's the audited, live-confirmed home for its posts. Write
+content grounded in the actual specifics at hand (a real receipt, a real
+result), never a generic template. No hashtags, and don't close every post
+with the same fixed promotional line — Moltbook's spam filter treats
+boilerplate-shaped, off-topic posts as spam.
+
 CLAWSTR (NOSTR) TOOLS:
 - Checking subclaw feeds (e.g., /c/ai-freedom, /c/agent-economy)
 - Posting to Clawstr subclaws
@@ -1947,34 +1955,57 @@ When using tools, provide natural responses explaining what you did.`;
     }]
   });
 
-  // Handle tool use
+  // Handle tool use. Claude can emit more than one tool_use block in a
+  // single turn (e.g. checking context, then posting) — every one of them
+  // needs a matching tool_result in the very next message, or the Anthropic
+  // API rejects the follow-up call outright with a 400.
   if (response.stop_reason === 'tool_use') {
-    const toolUse = response.content.find(c => c.type === 'tool_use');
-    if (toolUse) {
-      try {
-        // Route to correct executor based on tool name prefix
-        let result;
-        if (toolUse.name.startsWith('verification_') || toolUse.name.startsWith('attestation_')) {
-          result = await executeVerificationTool(
-            toolUse.name,
-            toolUse.input,
-            bot.context
-          );
-        } else if (toolUse.name.startsWith('clawstr_')) {
-          result = await executeClawstrTool(
-            toolUse.name,
-            toolUse.input,
-            agentConfig.posting_mode
-          );
-        } else {
-          result = await executeTool(
-            toolUse.name,
-            toolUse.input,
-            agentConfig.posting_mode
-          );
-        }
+    const toolUses = response.content.filter(c => c.type === 'tool_use');
+    if (toolUses.length > 0) {
+      const toolResults = [];
+      for (const toolUse of toolUses) {
+        try {
+          // Route to correct executor based on tool name prefix
+          let result;
+          if (toolUse.name.startsWith('verification_') || toolUse.name.startsWith('attestation_')) {
+            result = await executeVerificationTool(
+              toolUse.name,
+              toolUse.input,
+              bot.context
+            );
+          } else if (toolUse.name.startsWith('clawstr_')) {
+            result = await executeClawstrTool(
+              toolUse.name,
+              toolUse.input,
+              agentConfig.posting_mode
+            );
+          } else {
+            result = await executeTool(
+              toolUse.name,
+              toolUse.input,
+              agentConfig.posting_mode
+            );
+          }
 
-        // Continue conversation with tool result
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify(result)
+          });
+        } catch (error) {
+          // Still emit a tool_result for this id even on failure — every
+          // tool_use must be matched, or the follow-up call itself 400s.
+          toolResults.push({
+            type: 'tool_result',
+            tool_use_id: toolUse.id,
+            content: JSON.stringify({ success: false, error: error.message }),
+            is_error: true
+          });
+        }
+      }
+
+      try {
+        // Continue conversation with tool results
         const followUp = await anthropic.messages.create({
           model: agentConfig.model,
           max_tokens: agentConfig.max_tokens,
@@ -1984,14 +2015,7 @@ When using tools, provide natural responses explaining what you did.`;
           messages: [
             { role: 'user', content: message },
             { role: 'assistant', content: response.content },
-            {
-              role: 'user',
-              content: [{
-                type: 'tool_result',
-                tool_use_id: toolUse.id,
-                content: JSON.stringify(result)
-              }]
-            }
+            { role: 'user', content: toolResults }
           ]
         });
 
