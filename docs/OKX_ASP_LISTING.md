@@ -1,5 +1,14 @@
 # OKX AI — ASP Listing (Agent-to-MCP)
 
+**Status: LIVE.** Agent #10381 is approved and listed —
+`approvalDisplayStatus: 4`, `"Listed — eligible for task recommendations"`,
+confirmed independently via `onchainos agent search "commitment verification"`
+returning Kinetix with the correct avatar, endpoint and price. Took 9
+submission rounds; see `okx-asp-listing` memory and the round-by-round history
+in `.okx-submission-handoff.md` for what each rejection actually was and how
+it was found — worth reading before touching this listing again, since most
+rounds turned on a real, specific bug rather than a vague "resubmit and hope."
+
 Runbook for listing Kinetix on OKX AI as a verification Agent Service Provider.
 
 Registration is **Agent-to-MCP only**. Agent-to-Agent (negotiated scope, escrow,
@@ -304,6 +313,28 @@ and failure. Covered by `tests/x402-server.test.js` and the preflight script.
 
 Server faults deliberately omit `error.message`: an ENOENT or RPC failure would
 otherwise leak container paths to an anonymous caller.
+
+### Avatar spec
+
+OKX rejected round 8 on the avatar alone, after every endpoint/parameter issue
+from rounds 1–7 was resolved: **440×440 px, square corners (no alpha/rounded
+mask), PNG, sharp**. Confirmed by downloading and measuring the file OKX
+actually hosts — it was exactly what got uploaded, no server-side transform.
+
+- Image **links are rejected**; upload a file with `agent upload --file <path>`,
+  which returns a CDN URL, then pass that URL to `agent update --picture`.
+- PNG/JPEG/WebP only, **< 1 MB**.
+- The original design (`kinetix-icon-1024.png`) had a baked-in iOS-style
+  squircle mask (~22% corner radius, 4% of pixels fully transparent). There is
+  no vector source for this artwork — only PNGs. `scripts/make-okx-avatar.py`
+  fits the background's linear gradient from the opaque region and fills the
+  transparent corners with it (verified: fit residual < 1.5/255 per channel,
+  so the fill is visually seamless), flattens to RGB (no alpha channel at
+  all), and resizes to 440×440. Output committed at
+  `assets/kinetix-avatar-440.png`.
+- After uploading, **re-download the returned CDN URL and re-measure it** —
+  the whole point of this round is that what OKX hosts is what gets reviewed,
+  not what was sent.
 
 ## ASP profile description
 
