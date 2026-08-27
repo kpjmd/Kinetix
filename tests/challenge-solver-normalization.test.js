@@ -17,6 +17,12 @@ const LIVE_CHALLENGE =
   'L]oB-sT{eR} Ex^eRtS LoOoObsssTeR ThIrTy] FiV e N]eWtO/ns WiTh/ OnE ClA.w ' +
   'AnD GaAiN s TwEeLvE N]eWtO/ns AfTeR MoL tInG, WhA tS ToTaL FoR cE?';
 
+// ...and from the 2026-08-27 20:11 heartbeat, which answered 22.00 (20 + 2)
+// for a problem whose "*" had been stripped as if it were injected noise.
+const LIVE_MULTIPLY =
+  'Lo]bS-tEr S^wImS Um, LiKe, LoOooObSsStEr, AnD iT sNaPpS ClAwS LiKe ThIs: ' +
+  'C lA]w F^oRcE Is TwEnTy ~ NeWtOnS * TwO { ClAwS } Um, HoW/ MuCh ToTaL FoRcE?';
+
 const solve = text => parseArithmetic(normalizeChallengeText(text));
 
 describe('normalizeChallengeText', () => {
@@ -103,5 +109,50 @@ describe('parseArithmetic', () => {
 
   it('is not confident with no operator signal at all', () => {
     expect(solve('ten newtons twelve newtons').confident).toBe(false);
+  });
+});
+
+describe('arithmetic operators survive normalization', () => {
+  it('keeps a standalone operator but drops the same character mid-word', () => {
+    // "*" is a real operator; "^" in F^oRcE and "/" in HoW/ are injected noise.
+    expect(normalizeChallengeText('F^oRcE Is TwEnTy * TwO HoW/ MuCh'))
+      .toBe('force is twenty * two how much');
+  });
+
+  it('drops a standalone character that is not an arithmetic operator', () => {
+    expect(normalizeChallengeText('TwEnTy ~ NeWtOnS')).toBe('twenty newtons');
+  });
+
+  it('separates an operator written tight between digits', () => {
+    expect(normalizeChallengeText('20*2 NeWtOnS')).toBe('20 * 2 newtons');
+  });
+
+  it('keeps each of the four operators', () => {
+    expect(normalizeChallengeText('two + two')).toBe('two + two');
+    expect(normalizeChallengeText('two - two')).toBe('two - two');
+    expect(normalizeChallengeText('two / two')).toBe('two / two');
+    expect(normalizeChallengeText('two * two')).toBe('two * two');
+  });
+});
+
+describe('parseArithmetic operator symbols', () => {
+  it('solves the live 2026-08-27 20:11 challenge as 40, not 22', () => {
+    const result = solve(LIVE_MULTIPLY);
+    expect(result).toMatchObject({ value: 40, op: 'mul', confident: true });
+  });
+
+  it('lets an operator symbol outrank the "and"/"total" filler', () => {
+    // "and" and "total" are both present and both say add; "*" wins.
+    expect(solve('lobster and it has twenty newtons * two claws total').op).toBe('mul');
+  });
+
+  it('reads each symbol as its own operation', () => {
+    expect(solve('forty eight newtons / six').value).toBe(8);
+    expect(solve('forty newtons - twelve newtons and total').value).toBe(28);
+    expect(solve('thirty two newtons + sixteen newtons total').value).toBe(48);
+  });
+
+  it('is not confident when two different symbols appear', () => {
+    expect(solve('two + two * two').confident).toBe(false);
   });
 });

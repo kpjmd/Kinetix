@@ -155,3 +155,80 @@ describe('submitChallengeAnswer', () => {
     expect(axios.post.mock.calls[0][1]).toEqual({ answer: '47.00' });
   });
 });
+
+describe('re-solving when candidates run out', () => {
+  beforeEach(() => {
+    axios.post.mockReset();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('re-solves when the only candidate is rejected and time remains', async () => {
+    // This is the 2026-08-27 20:11 shape: every model sample refused, so the
+    // first pass produced just the (wrong) deterministic answer.
+    axios.post.mockImplementationOnce(INCORRECT).mockImplementationOnce(OK);
+    const resolve = jest.fn().mockResolvedValue(['40.00']);
+
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .resolves.toMatchObject({ verified: true });
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(axios.post.mock.calls.map(c => c[1].answer)).toEqual(['22.00', '40.00']);
+  });
+
+  it('re-solves at most once', async () => {
+    axios.post.mockImplementation(INCORRECT);
+    const resolve = jest.fn().mockResolvedValue(['40.00']);
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(resolve).toHaveBeenCalledTimes(1);
+  });
+
+  it('still never exceeds 3 posted answers', async () => {
+    axios.post.mockImplementation(INCORRECT);
+    const resolve = jest.fn().mockResolvedValue(['50.00', '60.00', '70.00']);
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(axios.post).toHaveBeenCalledTimes(3);
+  });
+
+  it('ignores re-solved answers that were already rejected', async () => {
+    axios.post.mockImplementation(INCORRECT);
+    const resolve = jest.fn().mockResolvedValue(['22.00']);
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(axios.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-solve when the answer was never called incorrect', async () => {
+    axios.post.mockImplementation(BAD_SHAPE);
+    const resolve = jest.fn().mockResolvedValue(['40.00']);
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('does not re-solve when too little time is left for a solve', async () => {
+    const soon = {
+      ...challengeData,
+      verification: {
+        ...challengeData.verification,
+        expires_at: new Date(Date.now() + 20000).toISOString().replace('T', ' ').replace('Z', '+00')
+      }
+    };
+    axios.post.mockImplementation(INCORRECT);
+    const resolve = jest.fn().mockResolvedValue(['40.00']);
+    await expect(submitChallengeAnswer(soon, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('survives a re-solve that throws', async () => {
+    axios.post.mockImplementation(INCORRECT);
+    const resolve = jest.fn().mockRejectedValue(new Error('model down'));
+    await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+  });
+});
