@@ -56,10 +56,19 @@ const SUSPENSION_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 // `data.challenge_text` as originally assumed — that shape never matched,
 // which is why every post since Feb 2026 sat at verification_status:
 // "pending" with the challenge silently unanswered.
+//
+// Confirmed again live (Aug 2026): GET /posts/{id} now wraps the resource
+// as { success, post: {...} } — an envelope that didn't exist in the July
+// audit. Posts made since then sat back at verification_status: "pending"
+// with zero challenge-solver activity in the logs, meaning the check below
+// never fired at all. Most likely cause: POST /posts started wrapping the
+// same way, putting `verification` at `data.post.verification` instead of
+// `data.verification` — a level this interceptor never looked at. Checking
+// both keeps this working regardless of which envelope shape is live.
 client.interceptors.response.use(
   response => {
     const { data } = response;
-    const nested = data?.verification;
+    const nested = data?.verification || data?.post?.verification;
     const isEmbeddedChallenge =
       data && (data.challenge || data.challenge_text || data.verification_required || nested?.challenge_text);
     if (isEmbeddedChallenge) {
@@ -70,7 +79,9 @@ client.interceptors.response.use(
       // the nested verification block — the caller needs the real id to
       // return once the challenge is solved, since POST /verify's own
       // response only echoes back a content_id, not the full resource.
-      err.challengeData = data;
+      // Unwrap the `post` envelope if present so callers always get a flat
+      // resource with `.id`/`.verification` directly on it.
+      err.challengeData = data?.post || data;
       throw err;
     }
     return response;

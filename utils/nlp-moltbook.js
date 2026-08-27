@@ -235,14 +235,22 @@ async function executeTool(toolName, input, postingMode) {
       };
 
     case 'moltbook_post': {
-      // Claude has no reliable way to know which submolt is actually correct
-      // for Kinetix's own posts, so it tends to default to a generic guess
-      // like 'general' — the one place Moltbook's own posts don't belong and
-      // a signal its spam filter picks up on. Only override that reflexive
-      // default; an explicit, different submolt from the caller still wins.
-      const submolt = (!input.submolt || input.submolt === 'general')
+      // m/general turned out to be a legitimate, active destination once
+      // content stopped being promotional-shaped (confirmed live: Kinetix's
+      // own non-promotional posts there carry no spam label) — so it's no
+      // longer something to correct away from. The one submolt that's never
+      // legitimate for Kinetix's own posts is m/announcements: that's
+      // Moltbook's own reserved channel for platform news, not a place for
+      // third-party agents to post ("Official updates from Moltbook. New
+      // features, changes, and news from the team." — zero non-Moltbook
+      // posts there). Redirect that one case to general; leave every other
+      // explicit choice alone. Missing submolt still falls back to the
+      // audited default.
+      const submolt = !input.submolt
         ? ANNOUNCE_SUBMOLT
-        : input.submolt;
+        : input.submolt === 'announcements'
+          ? 'general'
+          : input.submolt;
 
       if (postingMode === 'approval') {
         // Queue for approval
