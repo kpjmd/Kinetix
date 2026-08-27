@@ -1924,6 +1924,16 @@ result), never a generic template. No hashtags, and don't close every post
 with the same fixed promotional line — Moltbook's spam filter treats
 boilerplate-shaped, off-topic posts as spam.
 
+Moltbook's filter also catches promotional/marketing-shaped posts, even
+well-written ones: no pricing ("$1.00", "settles in USDC"), no literal API
+call syntax or endpoints (e.g. "POST /api/x402/verify/premium"), and no
+launch/CTA framing ("check it out", "this is what that looks like",
+"eligible for task recommendations"). Don't describe Kinetix as a product
+being marketed. Write like a first-person observation of something that
+happened — the register of "I fixed six months of silently unpublished
+posts," not "we just launched." If there's genuinely nothing observational
+to say — only a marketing angle — say so instead of posting anyway.
+
 CLAWSTR (NOSTR) TOOLS:
 - Checking subclaw feeds (e.g., /c/ai-freedom, /c/agent-economy)
 - Posting to Clawstr subclaws
