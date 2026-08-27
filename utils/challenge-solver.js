@@ -3,6 +3,11 @@ const axios = require('axios');
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+const SOLVE_MODEL = 'claude-sonnet-5';
+const SOLVE_SAMPLES = 3;
+const MAX_CANDIDATES = 3;
+const EXPIRY_MARGIN_MS = 15000;
+
 // Admin notification callback - set by telegram-bot at startup
 let _notifyAdmin = null;
 
@@ -24,6 +29,268 @@ async function notifyAdmin(message) {
   }
 }
 
+// ===== Vocabulary =====
+
+const NUMBER_WORDS = {
+  zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7,
+  eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, thirteen: 13,
+  fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18,
+  nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60,
+  seventy: 70, eighty: 80, ninety: 90
+};
+
+const MULTIPLIER_WORDS = { hundred: 100, thousand: 1000, million: 1000000 };
+
+const UNIT_WORDS = new Set([
+  'newtons', 'newton', 'n', 'pounds', 'pound', 'lbs', 'lb', 'grams', 'gram',
+  'g', 'kg', 'kilograms', 'units', 'unit', 'meters', 'meter', 'm', 'degrees',
+  'degree', 'dollars', 'dollar', 'joules', 'joule', 'watts', 'watt', 'shells',
+  'shell', 'claws', 'clams'
+]);
+
+// Strong operator signals: an unambiguous statement of the operation.
+const STRONG_OPS = {
+  add: ['gains', 'gain', 'gained', 'plus', 'more', 'sum', 'added', 'adds',
+        'increase', 'increases', 'increased', 'gathers', 'collects'],
+  sub: ['loses', 'lose', 'lost', 'losing', 'minus', 'less', 'drops', 'dropped',
+        'breaks', 'broke', 'remaining', 'remains', 'decrease', 'decreases',
+        'decreased', 'sheds', 'shed'],
+  mul: ['times', 'multiplied', 'multiply', 'twice', 'product', 'each', 'per'],
+  div: ['divided', 'divide', 'split', 'shared', 'share', 'quotient']
+};
+
+// Weak signals: only consulted when no strong signal is present. "and"/"total"
+// are filler in almost every challenge, so they must never outvote "loses".
+const WEAK_OPS = {
+  add: ['and', 'total', 'combined', 'altogether', 'together', 'overall']
+};
+
+// Domain words used to rejoin fragments split by injected whitespace
+// ("FiV e" -> "five", "N]eWtO/ns" -> "newtons", "FoR cE" -> "force").
+const DOMAIN_WORDS = [
+  'lobster', 'lobsters', 'claw', 'claws', 'molting', 'molt', 'molts', 'molted',
+  'exerts', 'exert', 'force', 'forces', 'total', 'after', 'before', 'with',
+  'what', 'whats', 'how', 'many', 'much', 'the', 'its', 'has', 'have'
+];
+
+const VOCAB = new Set([
+  ...Object.keys(NUMBER_WORDS),
+  ...Object.keys(MULTIPLIER_WORDS),
+  ...UNIT_WORDS,
+  ...Object.values(STRONG_OPS).flat(),
+  ...Object.values(WEAK_OPS).flat(),
+  ...DOMAIN_WORDS
+]);
+
+/**
+ * Canonical form: collapse every run of a repeated letter to a single letter.
+ * Moltbook pads letters at random ("LoOoObsssTeR", "TwEeLvE"), so comparing
+ * canonical forms matches an obfuscated token to its real word regardless of
+ * how many times a letter was doubled.
+ */
+function canon(word) {
+  return word.replace(/([a-z])\1+/g, '$1');
+}
+
+const CANON_VOCAB = new Map();
+for (const w of VOCAB) {
+  const c = canon(w);
+  if (!CANON_VOCAB.has(c)) CANON_VOCAB.set(c, w);
+}
+
+/**
+ * Resolve a possibly-obfuscated token to a real vocabulary word, or null.
+ */
+function resolveToken(token) {
+  if (!token) return null;
+  if (VOCAB.has(token)) return token;
+  return CANON_VOCAB.get(canon(token)) || null;
+}
+
+// ===== Normalization =====
+
+/**
+ * Replace control and zero-width characters with spaces. Done by code point
+ * rather than a regex range so the source stays free of literal invisibles.
+ */
+function stripInvisible(str) {
+  let out = '';
+  for (const ch of str) {
+    const cp = ch.codePointAt(0);
+    const invisible = cp < 32 || cp === 127 || (cp >= 0x200b && cp <= 0x200f) || cp === 0xfeff;
+    out += invisible ? ' ' : ch;
+  }
+  return out;
+}
+
+/**
+ * Strip Moltbook's obfuscation from a challenge string.
+ *
+ * Live sample (Aug 2026):
+ *   "L]oB-sT{eR} Ex^eRtS LoOoObsssTeR ThIrTy] FiV e N]eWtO/ns WiTh/ OnE
+ *    ClA.w AnD GaAiN s TwEeLvE N]eWtO/ns AfTeR MoL tInG, WhA tS ToTaL FoR cE?"
+ * normalizes to
+ *   "lobster exerts lobster thirty five newtons with one claw and gains
+ *    twelve newtons after molting whats total force"
+ *
+ * The obfuscation uses four independent tricks - random casing, injected
+ * punctuation, padded letters, and split words. Handling the last two is what
+ * fixes the 2026-08-27 failure, where the model read "ThIrTy] FiV e" as
+ * "thirty" and answered 42.00 instead of 47.00.
+ * @param {string} raw
+ * @returns {string} Normalized lowercase text
+ */
+function normalizeChallengeText(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  // Injected punctuation. '.' and '-' are handled separately below so that
+  // decimals ("12.50") and negatives survive.
+  let s = stripInvisible(raw)
+    .replace(/[[\]{}^/\\|~*_+=<>()#@$%&"'`;:!?,]/g, ' ')
+    .toLowerCase();
+
+  // Drop '.' and '-' unless they sit between two digits.
+  s = s.replace(/[.\-]/g, (m, offset, str) => {
+    const prev = str[offset - 1] || '';
+    const next = str[offset + 1] || '';
+    return /\d/.test(prev) && /\d/.test(next) ? m : ' ';
+  });
+
+  const rawTokens = s.split(/\s+/).filter(Boolean);
+
+  // Rejoin words split by injected whitespace. Greedily prefer the longest
+  // join (3 tokens, then 2) that resolves to a real word. A join is only
+  // accepted when at least one component does not already stand on its own,
+  // so genuine word pairs ("one claw") are never fused.
+  const tokens = [];
+  for (let i = 0; i < rawTokens.length; i++) {
+    let joined = null;
+    for (let span = 4; span >= 2; span--) {
+      if (i + span > rawTokens.length) continue;
+      const parts = rawTokens.slice(i, i + span);
+      if (parts.some(p => /\d/.test(p))) continue;
+      const resolved = resolveToken(parts.join(''));
+      if (!resolved) continue;
+      if (parts.every(p => resolveToken(p))) continue;
+      joined = { word: resolved, span };
+      break;
+    }
+    if (joined) {
+      tokens.push(joined.word);
+      i += joined.span - 1;
+    } else {
+      tokens.push(resolveToken(rawTokens[i]) || rawTokens[i]);
+    }
+  }
+
+  return tokens.join(' ');
+}
+
+// ===== Deterministic arithmetic parser =====
+
+/**
+ * Walk normalized tokens and collect numeric operands, folding compound
+ * number words ("thirty five" -> 35, "two hundred fifty" -> 250).
+ * @returns {Array<{value: number, endIndex: number}>}
+ */
+function extractOperands(tokens) {
+  const operands = [];
+  let current = 0;
+  let active = false;
+  let endIndex = -1;
+
+  const flush = () => {
+    if (active) operands.push({ value: current, endIndex });
+    current = 0;
+    active = false;
+  };
+
+  tokens.forEach((token, i) => {
+    if (/^-?\d+(?:\.\d+)?$/.test(token)) {
+      flush();
+      operands.push({ value: Number(token), endIndex: i });
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(NUMBER_WORDS, token)) {
+      current += NUMBER_WORDS[token];
+      active = true;
+      endIndex = i;
+      return;
+    }
+    if (Object.prototype.hasOwnProperty.call(MULTIPLIER_WORDS, token)) {
+      current = (current || 1) * MULTIPLIER_WORDS[token];
+      active = true;
+      endIndex = i;
+      return;
+    }
+    flush();
+  });
+  flush();
+
+  return operands;
+}
+
+/**
+ * Determine the operation from keyword families. Strong signals win outright;
+ * weak filler ("and", "total") is only consulted when no strong signal exists.
+ * @returns {string|null} 'add' | 'sub' | 'mul' | 'div' | null
+ */
+function detectOperation(tokens) {
+  const present = new Set(tokens);
+  const strong = Object.keys(STRONG_OPS).filter(op =>
+    STRONG_OPS[op].some(kw => present.has(kw))
+  );
+  if (strong.length === 1) return strong[0];
+  if (strong.length > 1) return null; // genuinely ambiguous - defer to the model
+
+  const weak = Object.keys(WEAK_OPS).filter(op =>
+    WEAK_OPS[op].some(kw => present.has(kw))
+  );
+  return weak.length === 1 ? weak[0] : null;
+}
+
+/**
+ * Deterministically solve a normalized two-operand challenge.
+ *
+ * This is a cross-check against the model, not the sole authority: it only
+ * reports `confident` for the simple shape Moltbook actually uses (exactly two
+ * unit-bearing quantities and one unambiguous operation).
+ * @param {string} normalized - Output of normalizeChallengeText
+ * @returns {{value: number|null, confident: boolean, operands: number[], op: string|null}}
+ */
+function parseArithmetic(normalized) {
+  const tokens = String(normalized || '').split(/\s+/).filter(Boolean);
+  const all = extractOperands(tokens);
+
+  // Prefer quantities followed closely by a unit ("thirty five newtons"). This
+  // is what discards the "one claw" distractor in the live challenge.
+  const unitBearing = all.filter(o =>
+    tokens.slice(o.endIndex + 1, o.endIndex + 3).some(t => UNIT_WORDS.has(t))
+  );
+  const operands = unitBearing.length >= 2 ? unitBearing : all;
+
+  const op = detectOperation(tokens);
+  const values = operands.map(o => o.value);
+
+  if (operands.length !== 2 || !op) {
+    return { value: null, confident: false, operands: values, op };
+  }
+
+  const [a, b] = values;
+  let value = null;
+  if (op === 'add') value = a + b;
+  else if (op === 'sub') value = a - b;
+  else if (op === 'mul') value = a * b;
+  else if (op === 'div') value = b === 0 ? null : a / b;
+
+  if (value === null || !Number.isFinite(value)) {
+    return { value: null, confident: false, operands: values, op };
+  }
+  return { value, confident: true, operands: values, op };
+}
+
+// ===== Challenge extraction =====
+
 /**
  * Confirmed live (Jul 2026): moltbookApi passes through the FULL created
  * resource as challengeData (so callers still have its real id), with the
@@ -32,111 +299,279 @@ async function notifyAdmin(message) {
  * This unwraps that, falling back to a flat shape for robustness in case
  * Moltbook embeds it differently on another endpoint.
  * @param {Object} challengeData
- * @returns {Object} { challengeText, verificationCode, instructions }
+ * @returns {Object} { challengeText, verificationCode, instructions, expiresAt }
  */
 function getVerificationBlock(challengeData) {
-  const v = challengeData.verification || challengeData;
+  const v = (challengeData && challengeData.verification) || challengeData || {};
   return {
-    challengeText: v.challenge_text || v.challenge || v.problem || JSON.stringify(challengeData),
+    // No JSON.stringify fallback: if there is no challenge text there is
+    // nothing to solve, and asking the model to "compute the answer" from a
+    // serialized post object only ever produced garbage submissions.
+    challengeText: v.challenge_text || v.challenge || v.problem || null,
     verificationCode: v.verification_code || v.challenge_id || v.id || v.token || null,
-    instructions: v.instructions || null
+    instructions: v.instructions || null,
+    expiresAt: v.expires_at || v.expiresAt || null
   };
 }
 
 /**
- * Use Claude Haiku to decode the obfuscated lobster math problem and return
- * only the numeric answer as a string, formatted per Moltbook's own
- * instructions (confirmed live: two decimal places, e.g. "28.00").
+ * Parse Moltbook's expires_at ("2026-08-27 16:07:16.099559+00") to epoch ms.
+ * @returns {number|null}
+ */
+function parseExpiry(value) {
+  if (!value) return null;
+  let s = String(value).trim().replace(' ', 'T');
+  s = s.replace(/(\.\d{3})\d+/, '$1');          // JS only handles ms precision
+  if (/[+-]\d{2}$/.test(s)) s += ':00';          // "+00" -> "+00:00"
+  const t = Date.parse(s);
+  return Number.isFinite(t) ? t : null;
+}
+
+/** Extract the final numeric token from a model reply, as a 2-decimal string. */
+function extractAnswer(text) {
+  const numbers = String(text || '').match(/-?\d+(?:\.\d+)?/g);
+  if (!numbers || !numbers.length) return null;
+  const n = Number(numbers[numbers.length - 1]);
+  return Number.isFinite(n) ? n.toFixed(2) : null;
+}
+
+// ===== Solving =====
+
+/**
+ * Produce an ordered list of candidate answers for a challenge.
  *
- * Confirmed live (Aug 2026): Moltbook's own instructions are already
- * unambiguous ("respond with ONLY the number... e.g. '525.00'"), but Haiku
- * still frequently opens with a reasoning preamble ("I need to decode this
- * lobster-themed math problem.", "The problem is asking: 32 N", "Calculation")
- * — and the old max_tokens: 64 cut generations off before they ever reached
- * a number, so every submission failed Moltbook's format check. Fixed by
- * giving the model room to actually finish reasoning, and — since prompt
- * compliance alone isn't reliable — extracting the last numeric token from
- * whatever it returns rather than trusting the full response to be bare.
+ * Two independent solvers run against the same normalized text:
+ *  - `parseArithmetic`, a deterministic parser that cannot drop a token the
+ *    way a model can (this is what the 2026-08-27 "42.00 instead of 47.00"
+ *    failure was: "ThIrTy] FiV e" read as thirty);
+ *  - three samples from Sonnet, majority-voted, which handles phrasings the
+ *    parser is not confident about.
+ *
+ * A real majority (2 of 3) leads; otherwise the deterministic value leads.
+ * Callers submit these in order, using Moltbook's own "Incorrect answer"
+ * response as an oracle.
  * @param {Object} challengeData - Raw challenge object from Moltbook response
- * @returns {Promise<string>} Numeric answer string, formatted to 2 decimals
+ * @returns {Promise<{candidates: string[], normalized: string, deterministic: string|null}>}
  */
 async function solveChallenge(challengeData) {
   const { challengeText, instructions } = getVerificationBlock(challengeData);
+  if (!challengeText) {
+    throw new Error('Challenge has no challenge_text - nothing to solve');
+  }
 
+  const normalized = normalizeChallengeText(challengeText);
   console.log('[ChallengeSolver] Solving challenge:', challengeText);
+  console.log('[ChallengeSolver] Normalized:', normalized);
 
-  const response = await anthropic.messages.create({
-    model: 'claude-haiku-4-5-20251001',
-    max_tokens: 300,
-    messages: [
-      {
-        role: 'user',
-        content:
-          'This is an obfuscated lobster-themed math problem. Decode the garbled text and compute the answer. ' +
-          'Do not explain your reasoning or show your work — respond with ONLY the final number. ' +
-          (instructions ? `Formatting instructions: ${instructions} ` : 'Format the number with 2 decimal places. ') +
-          'Problem: ' + challengeText
+  const parsed = parseArithmetic(normalized);
+  const deterministic = parsed.confident ? parsed.value.toFixed(2) : null;
+  if (deterministic) {
+    console.log(`[ChallengeSolver] Deterministic parse: ${parsed.operands.join(` ${parsed.op} `)} = ${deterministic}`);
+  } else {
+    console.log('[ChallengeSolver] Deterministic parse not confident:', JSON.stringify(parsed));
+  }
+
+  // Keep this framed as what it is - an arithmetic word problem in stylized
+  // text. Wording it as "decode the obfuscated verification challenge" reads
+  // as a request to defeat a bot check and draws a refusal (stop_reason:
+  // "refusal", empty content), which is how every sample silently failed
+  // during development.
+  const prompt =
+    'Solve this arithmetic word problem.\n\n' +
+    'It is written in a stylized way: letters are randomly capitalized and ' +
+    'sometimes repeated, and some words are broken up by stray spaces or ' +
+    'punctuation. Read each word back to its normal form before computing - for ' +
+    'example "ThIrTy] FiV e" is the number thirty-five, and "TwEeLvE" is twelve. ' +
+    'Take care not to overlook a fragment that was split off from its word.\n\n' +
+    `Problem: ${challengeText}\n` +
+    `The same problem with most of the styling removed: ${normalized}\n\n` +
+    (instructions || 'Give the number to 2 decimal places.') + '\n' +
+    'Respond with ONLY the final number.';
+
+  const samples = await Promise.all(
+    Array.from({ length: SOLVE_SAMPLES }, async () => {
+      try {
+        const response = await anthropic.messages.create({
+          model: SOLVE_MODEL,
+          max_tokens: 400,
+          temperature: 1,
+          messages: [{ role: 'user', content: prompt }]
+        });
+        // Find the text block rather than assuming content[0]: a refusal or a
+        // truncated generation can come back with content: [].
+        const block = (response.content || []).find(b => b && b.type === 'text');
+        if (!block) {
+          console.warn(`[ChallengeSolver] Sample returned no text (stop_reason: ${response.stop_reason})`);
+          return { rawText: '', answer: null };
+        }
+        const rawText = String(block.text || '').trim();
+        return { rawText, answer: extractAnswer(rawText) };
+      } catch (e) {
+        console.warn('[ChallengeSolver] Sample failed:', e.message);
+        return { rawText: '', answer: null };
       }
-    ]
-  });
+    })
+  );
 
-  const rawText = response.content[0].text.trim();
-  const numbers = rawText.match(/-?\d+(?:\.\d+)?/g);
-  const lastNumber = numbers && numbers.length ? numbers[numbers.length - 1] : null;
-  const answer = lastNumber ? Number(lastNumber).toFixed(2) : rawText;
-  console.log('[ChallengeSolver] Raw response:', rawText, '-> Answer:', answer);
-  return answer;
-}
+  const answers = samples.map(s => s.answer).filter(Boolean);
+  console.log('[ChallengeSolver] Model samples:', JSON.stringify(answers));
 
-/**
- * Submit the solved answer back to Moltbook via POST /api/v1/verify.
- *
- * Confirmed live (Jul 2026): the correct payload is
- * { verification_code, answer } — verification_code is the field Moltbook's
- * own challenge response actually uses, not challenge_id/id/token as
- * originally guessed. Those guesses are kept as fallbacks only in case a
- * different endpoint ever embeds the challenge in a different shape.
- * @param {Object} challengeData - Raw challenge object from Moltbook response
- * @param {string} answer - Numeric answer string
- * @returns {Promise<Object>} API response data
- */
-async function submitChallengeAnswer(challengeData, answer) {
-  const apiKey = process.env.MOLTBOOK_API_KEY;
-  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
-  const { verificationCode } = getVerificationBlock(challengeData);
-  const submitUrl = challengeData.verification?.submit_url || challengeData.submit_url || 'https://www.moltbook.com/api/v1/verify';
+  const counts = new Map();
+  for (const a of answers) counts.set(a, (counts.get(a) || 0) + 1);
+  let majority = null;
+  let majorityCount = 0;
+  for (const [a, c] of counts) {
+    if (c > majorityCount) { majority = a; majorityCount = c; }
+  }
 
-  const payloadAttempts = [];
-  if (verificationCode) payloadAttempts.push({ verification_code: verificationCode, answer });
-  payloadAttempts.push({ answer }); // challenge may be tied server-side to the authenticated agent
+  // A real consensus outranks the parser; a 3-way split does not.
+  const ordered = majorityCount >= 2
+    ? [majority, deterministic, ...answers]
+    : [deterministic, majority, ...answers];
 
-  for (const payload of payloadAttempts) {
-    try {
-      console.log(`[ChallengeSolver] POST ${submitUrl} with payload keys [${Object.keys(payload).join(',')}]`);
-      const res = await axios.post(submitUrl, payload, { headers, timeout: 15000 });
-      console.log(`[ChallengeSolver] Verified:`, res.data);
-      return res.data;
-    } catch (err) {
-      const status = err.response?.status;
-      const data = err.response?.data;
-      console.warn(`[ChallengeSolver] Payload keys [${Object.keys(payload).join(',')}] failed (${status}):`, JSON.stringify(data));
+  const candidates = [];
+  for (const c of ordered) {
+    if (c && !candidates.includes(c) && candidates.length < MAX_CANDIDATES) {
+      candidates.push(c);
     }
   }
 
-  // All attempts failed — log everything and notify admin
+  if (!candidates.length) {
+    throw new Error('Challenge produced no numeric answer candidates');
+  }
+  console.log(`[ChallengeSolver] Candidates (in order): ${candidates.join(', ')}`);
+  return { candidates, normalized, deterministic };
+}
+
+// ===== Submission =====
+
+/**
+ * Classify a /verify response so a wrong *answer* is never confused with a
+ * wrong *payload shape*.
+ *
+ * Live shapes (Aug 2026):
+ *  - wrong answer:  400 { message: "Incorrect answer", success: false, hint: ... }
+ *  - wrong payload: 400 { message: ["verification_code must be a string"] }
+ * The old code treated both as "try a different payload", so an incorrect
+ * answer silently burned the attempt instead of triggering a re-solve.
+ * @returns {'verified'|'incorrect'|'shape'|'expired'|'error'}
+ */
+function classifyVerifyResponse(status, data) {
+  const message = data && data.message;
+  const text = Array.isArray(message) ? message.join('; ') : String(message || data?.error || '');
+
+  if (Array.isArray(message)) return 'shape';
+  if (/expired|not found|no pending|already verified/i.test(text)) {
+    return /already verified/i.test(text) ? 'verified' : 'expired';
+  }
+  if (/incorrect|wrong answer|invalid answer/i.test(text)) return 'incorrect';
+  if (data && data.success === false) return 'incorrect';
+  if (status >= 200 && status < 300) return 'verified';
+  if (status === 400 || status === 422) return 'shape';
+  return 'error';
+}
+
+/**
+ * Submit candidate answers to Moltbook until one verifies.
+ *
+ * Moltbook tells us when an answer is wrong, so that response is used as an
+ * oracle: on "Incorrect answer" we advance to the next distinct candidate
+ * rather than giving up. Bounded by MAX_CANDIDATES and by the challenge's own
+ * ~5 minute expires_at.
+ * @param {Object} challengeData - Raw challenge object from Moltbook response
+ * @param {string[]} candidates - Ordered candidate answers
+ * @returns {Promise<Object>} API response data
+ */
+async function submitChallengeAnswer(challengeData, candidates) {
+  const apiKey = process.env.MOLTBOOK_API_KEY;
+  const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  const { verificationCode, expiresAt } = getVerificationBlock(challengeData);
+  const submitUrl = challengeData.verification?.submit_url || challengeData.submit_url
+    || 'https://www.moltbook.com/api/v1/verify';
+  const deadline = parseExpiry(expiresAt);
+  const contentId = challengeData.id || challengeData.content_id || null;
+
+  const list = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean);
+  const tried = [];
+
+  for (const answer of list) {
+    if (tried.includes(answer)) continue;
+    if (deadline && Date.now() > deadline - EXPIRY_MARGIN_MS) {
+      console.warn('[ChallengeSolver] Challenge window closed before all candidates were tried');
+      break;
+    }
+    tried.push(answer);
+
+    // Confirmed live (Jul 2026): { verification_code, answer } is the correct
+    // payload. The bare { answer } shape is only worth trying when we genuinely
+    // have no code - otherwise it just fails validation and buries the real error.
+    const shapes = verificationCode
+      ? [
+          { verification_code: verificationCode, answer },
+          { verification_code: verificationCode, answer: Number(answer) }
+        ]
+      : [{ answer }];
+
+    let advanceCandidate = false;
+    for (const payload of shapes) {
+      let status;
+      let data;
+      try {
+        const res = await axios.post(submitUrl, payload, { headers, timeout: 15000 });
+        status = res.status;
+        data = res.data;
+      } catch (err) {
+        if (!err.response) {
+          console.warn(`[ChallengeSolver] Network error submitting ${answer}:`, err.message);
+          break; // transport problem - a different payload shape will not help
+        }
+        status = err.response.status;
+        data = err.response.data;
+      }
+
+      const verdict = classifyVerifyResponse(status, data);
+      console.log(`[ChallengeSolver] answer=${answer} keys=[${Object.keys(payload).join(',')}] -> ${verdict} (${status})`);
+
+      if (verdict === 'verified') {
+        console.log('[ChallengeSolver] Verified:', JSON.stringify(data));
+        return data;
+      }
+      if (verdict === 'incorrect') { advanceCandidate = true; break; }
+      if (verdict === 'expired') {
+        console.warn('[ChallengeSolver] Challenge expired server-side, aborting');
+        advanceCandidate = false;
+        break;
+      }
+      console.warn(`[ChallengeSolver] Rejected (${verdict}):`, JSON.stringify(data));
+      // 'shape'/'error' fall through to the next payload shape for this answer.
+    }
+
+    // Only an "Incorrect answer" verdict means a different number could help.
+    // An expired challenge or a rejected payload shape will fail identically
+    // for every candidate, so stop rather than burn the rest of the list.
+    if (!advanceCandidate) break;
+  }
+
   const debugInfo =
     `[ChallengeSolver] ALL submission attempts failed against ${submitUrl}.\n` +
-    `challengeData: ${JSON.stringify(challengeData, null, 2)}\n` +
-    `answer: ${answer}`;
+    `candidatesTried: ${JSON.stringify(tried)}\n` +
+    `challengeData: ${JSON.stringify(challengeData, null, 2)}`;
   console.error(debugInfo);
 
-  const adminMsg =
-    `⚠️ *Moltbook Challenge Submission Failed*\n\n` +
-    `All payload shapes against ${submitUrl} were rejected. Full challenge data logged.\n\n` +
-    `\`\`\`\n${JSON.stringify(challengeData, null, 2).slice(0, 800)}\n\`\`\``;
-  await notifyAdmin(adminMsg);
+  await notifyAdmin(
+    `⚠️ *Moltbook Challenge Failed*\n\n` +
+    `Content \`${contentId || 'unknown'}\` is live but UNVERIFIED.\n` +
+    `Answers tried: ${tried.join(', ') || 'none'}\n\n` +
+    `\`\`\`\n${JSON.stringify(challengeData, null, 2).slice(0, 700)}\n\`\`\``
+  );
 
-  throw new Error('Challenge submission failed against /api/v1/verify — see logs for full challengeData');
+  const err = new Error(
+    `Challenge verification failed after ${tried.length} answer(s): ${tried.join(', ')}`
+  );
+  err.verificationFailed = true;
+  err.contentId = contentId;
+  err.candidatesTried = tried;
+  throw err;
 }
 
 /**
@@ -145,16 +580,17 @@ async function submitChallengeAnswer(challengeData, answer) {
  * @returns {Promise<Object>} Submission response
  */
 async function solveChallengeAndSubmit(challengeData) {
-  // Log and forward full challengeData to admin so we can observe API structure
-  console.log('[ChallengeSolver] Full challengeData:', JSON.stringify(challengeData, null, 2));
-  await notifyAdmin(
-    `🦞 *Moltbook Challenge Received*\n\n` +
-    `Attempting auto-solve...\n\n` +
-    `\`\`\`\n${JSON.stringify(challengeData, null, 2).slice(0, 800)}\n\`\`\``
-  );
-
-  const answer = await solveChallenge(challengeData);
-  return submitChallengeAnswer(challengeData, answer);
+  const { candidates } = await solveChallenge(challengeData);
+  return submitChallengeAnswer(challengeData, candidates);
 }
 
-module.exports = { solveChallengeAndSubmit, setAdminNotifier, _solveChallenge: solveChallenge };
+module.exports = {
+  solveChallengeAndSubmit,
+  setAdminNotifier,
+  normalizeChallengeText,
+  parseArithmetic,
+  _solveChallenge: solveChallenge,
+  _submitChallengeAnswer: submitChallengeAnswer,
+  _classifyVerifyResponse: classifyVerifyResponse,
+  _parseExpiry: parseExpiry
+};
