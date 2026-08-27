@@ -47,8 +47,18 @@ function getVerificationBlock(challengeData) {
  * Use Claude Haiku to decode the obfuscated lobster math problem and return
  * only the numeric answer as a string, formatted per Moltbook's own
  * instructions (confirmed live: two decimal places, e.g. "28.00").
+ *
+ * Confirmed live (Aug 2026): Moltbook's own instructions are already
+ * unambiguous ("respond with ONLY the number... e.g. '525.00'"), but Haiku
+ * still frequently opens with a reasoning preamble ("I need to decode this
+ * lobster-themed math problem.", "The problem is asking: 32 N", "Calculation")
+ * — and the old max_tokens: 64 cut generations off before they ever reached
+ * a number, so every submission failed Moltbook's format check. Fixed by
+ * giving the model room to actually finish reasoning, and — since prompt
+ * compliance alone isn't reliable — extracting the last numeric token from
+ * whatever it returns rather than trusting the full response to be bare.
  * @param {Object} challengeData - Raw challenge object from Moltbook response
- * @returns {Promise<string>} Numeric answer string
+ * @returns {Promise<string>} Numeric answer string, formatted to 2 decimals
  */
 async function solveChallenge(challengeData) {
   const { challengeText, instructions } = getVerificationBlock(challengeData);
@@ -57,20 +67,24 @@ async function solveChallenge(challengeData) {
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 64,
+    max_tokens: 300,
     messages: [
       {
         role: 'user',
         content:
           'This is an obfuscated lobster-themed math problem. Decode the garbled text and compute the answer. ' +
-          (instructions ? `Formatting instructions: ${instructions} ` : 'Return ONLY the number, nothing else. ') +
+          'Do not explain your reasoning or show your work — respond with ONLY the final number. ' +
+          (instructions ? `Formatting instructions: ${instructions} ` : 'Format the number with 2 decimal places. ') +
           'Problem: ' + challengeText
       }
     ]
   });
 
-  const answer = response.content[0].text.trim();
-  console.log('[ChallengeSolver] Answer:', answer);
+  const rawText = response.content[0].text.trim();
+  const numbers = rawText.match(/-?\d+(?:\.\d+)?/g);
+  const lastNumber = numbers && numbers.length ? numbers[numbers.length - 1] : null;
+  const answer = lastNumber ? Number(lastNumber).toFixed(2) : rawText;
+  console.log('[ChallengeSolver] Raw response:', rawText, '-> Answer:', answer);
   return answer;
 }
 
@@ -143,4 +157,4 @@ async function solveChallengeAndSubmit(challengeData) {
   return submitChallengeAnswer(challengeData, answer);
 }
 
-module.exports = { solveChallengeAndSubmit, setAdminNotifier };
+module.exports = { solveChallengeAndSubmit, setAdminNotifier, _solveChallenge: solveChallenge };

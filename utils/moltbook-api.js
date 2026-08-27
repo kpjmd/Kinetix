@@ -49,22 +49,15 @@ const SUSPENSION_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 
 // Response interceptor for success responses that embed a challenge.
 //
-// Confirmed live (Jul 2026): POST /posts returns 2xx with the created
+// Confirmed live (Jul 2026, re-confirmed via raw response logging Aug 2026):
+// POST /posts and POST /posts/{id}/comments return 2xx with the created
 // resource fields at the top level AND a sibling `verification` object:
-// { id, title, ..., verification: { verification_code, challenge_text,
-// expires_at, instructions } }. Not a top-level `data.challenge`/
-// `data.challenge_text` as originally assumed — that shape never matched,
-// which is why every post since Feb 2026 sat at verification_status:
-// "pending" with the challenge silently unanswered.
-//
-// Confirmed again live (Aug 2026): GET /posts/{id} now wraps the resource
-// as { success, post: {...} } — an envelope that didn't exist in the July
-// audit. Posts made since then sat back at verification_status: "pending"
-// with zero challenge-solver activity in the logs, meaning the check below
-// never fired at all. Most likely cause: POST /posts started wrapping the
-// same way, putting `verification` at `data.post.verification` instead of
-// `data.verification` — a level this interceptor never looked at. Checking
-// both keeps this working regardless of which envelope shape is live.
+// { id, ..., verification: { verification_code, challenge_text, expires_at,
+// instructions } } — flat, not wrapped in a `post`/`comment` envelope (that
+// wrapper only showed up on GET /posts/{id}, a separate endpoint). The
+// `data?.post?.verification`/`data?.comment?.verification` fallbacks below
+// are kept defensively in case a different endpoint ever wraps its create
+// response the way GET does, but the confirmed, common case is flat.
 client.interceptors.response.use(
   response => {
     const { data } = response;
@@ -83,16 +76,6 @@ client.interceptors.response.use(
       // get a flat resource with `.id`/`.verification` directly on it.
       err.challengeData = data?.post || data?.comment || data;
       throw err;
-    } else if (response.config?.method === 'post' && /\/posts(\/|$)/.test(response.config?.url || '')) {
-      // TEMPORARY diagnostic (remove once the real shape is confirmed): the
-      // Aug 2026 fix for the wrapped-envelope case didn't actually restore
-      // verification (a comment made right after that deploy still came
-      // back verification_status: "pending" with no challenge detected) —
-      // meaning the live shape is neither of the two we've guessed so far.
-      // Log the raw body on every post/comment creation that we did NOT
-      // treat as a challenge, so the next one tells us the real shape
-      // instead of guessing a third time.
-      console.log('[Moltbook API] 🔍 No challenge detected on creation response:', _summarize(data, 800));
     }
     return response;
   },
