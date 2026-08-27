@@ -201,14 +201,24 @@ async function createPost(submolt, title, content) {
       // gave us, never re-POST the content.
       console.log('[Moltbook API] Challenge received on createPost - auto-solving...');
       const { solveChallengeAndSubmit } = require('./challenge-solver');
-      await solveChallengeAndSubmit(error.challengeData);
-      await stateManager.recordMoltbookPost();
       // error.challengeData is the full original post (id/title/content/...)
-      // with a now-resolved `.verification` block — /verify's own response
-      // only echoes back a content_id, not the full resource, so this is the
-      // reliable source for the id callers need.
+      // with a `.verification` block — /verify's own response only echoes back
+      // a content_id, not the full resource, so this is the reliable source
+      // for the id callers need.
       const post = error.challengeData;
-      console.log(`[Moltbook API] Challenge solved - post live: ${post.id}`);
+      let verified = true;
+      try {
+        await solveChallengeAndSubmit(post);
+      } catch (challengeError) {
+        // The post exists server-side either way; it just stays at
+        // verification_status: "pending". Rethrowing here would leave the
+        // caller's own bookkeeping unrun, so the next heartbeat would post a
+        // duplicate. Record it, surface it, and return the resource.
+        verified = false;
+        console.error(`[Moltbook API] Post ${post.id} is live but UNVERIFIED:`, challengeError.message);
+      }
+      await stateManager.recordMoltbookPost();
+      console.log(`[Moltbook API] Post ${post.id} live (verified: ${verified})`);
       return post;
     }
     handleError(error);
@@ -295,10 +305,20 @@ async function addComment(postId, content, parentId = null) {
       // pending the challenge answer, so don't re-POST it.
       console.log('[Moltbook API] Challenge received on addComment - auto-solving...');
       const { solveChallengeAndSubmit } = require('./challenge-solver');
-      await solveChallengeAndSubmit(error.challengeData);
-      await stateManager.recordMoltbookComment();
       const comment = error.challengeData;
-      console.log(`[Moltbook API] Challenge solved - comment live: ${comment.id}`);
+      let verified = true;
+      try {
+        await solveChallengeAndSubmit(comment);
+      } catch (challengeError) {
+        // Same reasoning as createPost: the comment is already live (just
+        // unverified), so record it rather than throwing — otherwise
+        // heartbeat's recordEngagement never runs and the next cycle leaves a
+        // duplicate comment on the same post.
+        verified = false;
+        console.error(`[Moltbook API] Comment ${comment.id} is live but UNVERIFIED:`, challengeError.message);
+      }
+      await stateManager.recordMoltbookComment();
+      console.log(`[Moltbook API] Comment ${comment.id} live on post ${postId} (verified: ${verified})`);
       return comment;
     }
     handleError(error);
