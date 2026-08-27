@@ -68,7 +68,7 @@ const SUSPENSION_NOTIFY_INTERVAL_MS = 60 * 60 * 1000;
 client.interceptors.response.use(
   response => {
     const { data } = response;
-    const nested = data?.verification || data?.post?.verification;
+    const nested = data?.verification || data?.post?.verification || data?.comment?.verification;
     const isEmbeddedChallenge =
       data && (data.challenge || data.challenge_text || data.verification_required || nested?.challenge_text);
     if (isEmbeddedChallenge) {
@@ -79,10 +79,20 @@ client.interceptors.response.use(
       // the nested verification block — the caller needs the real id to
       // return once the challenge is solved, since POST /verify's own
       // response only echoes back a content_id, not the full resource.
-      // Unwrap the `post` envelope if present so callers always get a flat
-      // resource with `.id`/`.verification` directly on it.
-      err.challengeData = data?.post || data;
+      // Unwrap the `post`/`comment` envelope if present so callers always
+      // get a flat resource with `.id`/`.verification` directly on it.
+      err.challengeData = data?.post || data?.comment || data;
       throw err;
+    } else if (response.config?.method === 'post' && /\/posts(\/|$)/.test(response.config?.url || '')) {
+      // TEMPORARY diagnostic (remove once the real shape is confirmed): the
+      // Aug 2026 fix for the wrapped-envelope case didn't actually restore
+      // verification (a comment made right after that deploy still came
+      // back verification_status: "pending" with no challenge detected) —
+      // meaning the live shape is neither of the two we've guessed so far.
+      // Log the raw body on every post/comment creation that we did NOT
+      // treat as a challenge, so the next one tells us the real shape
+      // instead of guessing a third time.
+      console.log('[Moltbook API] 🔍 No challenge detected on creation response:', _summarize(data, 800));
     }
     return response;
   },
