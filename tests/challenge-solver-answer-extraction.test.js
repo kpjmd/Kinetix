@@ -18,6 +18,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 describe('challenge-solver candidate generation', () => {
   let mockCreate;
   let solveChallenge;
+  let lastPrompt;
 
   beforeEach(() => {
     mockCreate = jest.fn();
@@ -25,7 +26,7 @@ describe('challenge-solver candidate generation', () => {
       messages: { create: mockCreate }
     }));
     jest.isolateModules(() => {
-      ({ _solveChallenge: solveChallenge } = require('../utils/challenge-solver'));
+      ({ _solveChallenge: solveChallenge, _lastPrompt: lastPrompt } = require('../utils/challenge-solver'));
     });
     jest.spyOn(console, 'log').mockImplementation(() => {});
     jest.spyOn(console, 'warn').mockImplementation(() => {});
@@ -38,12 +39,12 @@ describe('challenge-solver candidate generation', () => {
     texts.forEach(t => mockCreate.mockResolvedValueOnce(reply(t)));
   };
 
-  // The parser is not confident here ("+" is not an operator keyword), so the
-  // model samples decide the outcome.
+  // Three operands and no single operation, so parseArithmetic reports
+  // confident: false and the model samples decide the outcome on their own.
   const modelLed = {
     verification: {
       verification_code: 'abc123',
-      challenge_text: 'lobster claw force is thirty two Newtons + sixteen Newtons how many?',
+      challenge_text: 'lobster riddle involving thirty two Newtons, sixteen Newtons and eight Newtons. what is the answer?',
       instructions: "Solve the math problem and respond with ONLY the number (with 2 decimal places, e.g., '525.00')."
     }
   };
@@ -56,7 +57,7 @@ describe('challenge-solver candidate generation', () => {
 
   it('extracts the trailing number past a reasoning preamble', async () => {
     say(
-      'I need to decode this lobster-themed math problem. 32 + 16 = 48',
+      'I need to work through this lobster riddle. 32 + 16 = 48',
       '48.00',
       '48.00'
     );
@@ -127,6 +128,22 @@ describe('challenge-solver candidate generation', () => {
     say('10.00', '20.00', '30.00');
     const { candidates } = await solveChallenge(modelLed);
     expect(candidates).toHaveLength(3);
+  });
+
+
+  // The raw obfuscated string is what makes the request read as CAPTCHA-solving:
+  // measured 5/5 refusals with it in the prompt, 5/5 correct without. This guard
+  // is here so a future prompt edit cannot quietly reintroduce it.
+  it('never sends the raw obfuscated text to the model', async () => {
+    const raw = 'C lA]w F^oRcE Is TwEnTy ~ NeWtOnS * TwO { ClAwS }';
+    say('40.00', '40.00', '40.00');
+    await solveChallenge({ verification: { verification_code: 'c', challenge_text: raw } });
+
+    const prompt = lastPrompt();
+    expect(prompt).not.toContain(raw);
+    expect(prompt).not.toContain('lA]w');
+    expect(prompt).not.toContain('F^oRcE');
+    expect(prompt).toContain('twenty newtons * two claws');
   });
 
   it('throws rather than solving a payload with no challenge_text', async () => {

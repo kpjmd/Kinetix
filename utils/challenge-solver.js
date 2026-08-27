@@ -7,6 +7,13 @@ const SOLVE_MODEL = 'claude-sonnet-5';
 const SOLVE_SAMPLES = 3;
 const MAX_CANDIDATES = 3;
 const EXPIRY_MARGIN_MS = 15000;
+// A re-solve costs a few seconds of model latency, so it needs more headroom
+// than a bare submission does.
+const RESOLVE_MARGIN_MS = 45000;
+
+// Last prompt sent to the model, kept only so tests can assert that the raw
+// obfuscated text never leaks back into it.
+let _lastPrompt = null;
 
 // Admin notification callback - set by telegram-bot at startup
 let _notifyAdmin = null;
@@ -41,12 +48,26 @@ const NUMBER_WORDS = {
 
 const MULTIPLIER_WORDS = { hundred: 100, thousand: 1000, million: 1000000 };
 
+// Real units only. Body parts ("claw", "claws") are deliberately excluded:
+// they appear both as distractors ("with one claw") and as multiplier counts
+// ("times two claws"), so treating them as units made operand selection depend
+// on pluralization.
 const UNIT_WORDS = new Set([
   'newtons', 'newton', 'n', 'pounds', 'pound', 'lbs', 'lb', 'grams', 'gram',
   'g', 'kg', 'kilograms', 'units', 'unit', 'meters', 'meter', 'm', 'degrees',
-  'degree', 'dollars', 'dollar', 'joules', 'joule', 'watts', 'watt', 'shells',
-  'shell', 'claws', 'clams'
+  'degree', 'dollars', 'dollar', 'joules', 'joule', 'watts', 'watt'
 ]);
+
+// A whitespace-delimited arithmetic character is a real operator; the same
+// character inside a word ("F^oRcE", "HoW/", "Lo]bS") is injected noise. Values
+// are canonical so the parser only ever sees one spelling per operation.
+const ARITHMETIC_SYMBOLS = { '*': '*', '/': '/', '+': '+', '-': '-' };
+// Unicode multiplication and division signs, added without literal glyphs to
+// keep this source ASCII.
+ARITHMETIC_SYMBOLS[String.fromCharCode(0x00d7)] = '*';
+ARITHMETIC_SYMBOLS[String.fromCharCode(0x00f7)] = '/';
+
+const SYMBOL_OPS = { '*': 'mul', '/': 'div', '+': 'add', '-': 'sub' };
 
 // Strong operator signals: an unambiguous statement of the operation.
 const STRONG_OPS = {
@@ -143,20 +164,26 @@ function stripInvisible(str) {
 function normalizeChallengeText(raw) {
   if (!raw || typeof raw !== 'string') return '';
 
-  // Injected punctuation. '.' and '-' are handled separately below so that
-  // decimals ("12.50") and negatives survive.
-  let s = stripInvisible(raw)
-    .replace(/[[\]{}^/\\|~*_+=<>()#@$%&"'`;:!?,]/g, ' ')
-    .toLowerCase();
+  // Space out an arithmetic symbol written tight between digits ("20*2") so it
+  // is seen as a standalone operator below rather than stripped as noise.
+  const spaced = stripInvisible(raw).replace(/(\d)\s*([*/+])\s*(\d)/g, '$1 $2 $3');
 
-  // Drop '.' and '-' unless they sit between two digits.
-  s = s.replace(/[.\-]/g, (m, offset, str) => {
-    const prev = str[offset - 1] || '';
-    const next = str[offset + 1] || '';
-    return /\d/.test(prev) && /\d/.test(next) ? m : ' ';
+  // Clean each whitespace-delimited piece separately, so that a lone operator
+  // survives while the same character embedded in a word does not.
+  const cleaned = spaced.split(/\s+/).filter(Boolean).map(piece => {
+    if (ARITHMETIC_SYMBOLS[piece]) return ARITHMETIC_SYMBOLS[piece];
+    // Injected punctuation. '.' and '-' are handled separately below so that
+    // decimals ("12.50") survive.
+    let t = piece.replace(/[[\]{}^/\\|~*_+=<>()#@$%&"'`;:!?,]/g, ' ').toLowerCase();
+    // Drop '.' and '-' unless they sit between two digits.
+    return t.replace(/[.\-]/g, (m, offset, str) => {
+      const prev = str[offset - 1] || '';
+      const next = str[offset + 1] || '';
+      return /\d/.test(prev) && /\d/.test(next) ? m : ' ';
+    });
   });
 
-  const rawTokens = s.split(/\s+/).filter(Boolean);
+  const rawTokens = cleaned.join(' ').split(/\s+/).filter(Boolean);
 
   // Rejoin words split by injected whitespace. Greedily prefer the longest
   // join (3 tokens, then 2) that resolves to a real word. A join is only
@@ -168,7 +195,7 @@ function normalizeChallengeText(raw) {
     for (let span = 4; span >= 2; span--) {
       if (i + span > rawTokens.length) continue;
       const parts = rawTokens.slice(i, i + span);
-      if (parts.some(p => /\d/.test(p))) continue;
+      if (parts.some(p => /\d/.test(p) || SYMBOL_OPS[p])) continue;
       const resolved = resolveToken(parts.join(''));
       if (!resolved) continue;
       if (parts.every(p => resolveToken(p))) continue;
@@ -237,6 +264,14 @@ function extractOperands(tokens) {
  */
 function detectOperation(tokens) {
   const present = new Set(tokens);
+
+  // An explicit operator symbol states the operation outright and outranks
+  // every keyword — "and"/"total" filler appears in nearly every challenge, so
+  // without this a "twenty newtons * two claws" problem is read as addition.
+  const symbols = Object.keys(SYMBOL_OPS).filter(sym => present.has(sym));
+  if (symbols.length === 1) return SYMBOL_OPS[symbols[0]];
+  if (symbols.length > 1) return null;
+
   const strong = Object.keys(STRONG_OPS).filter(op =>
     STRONG_OPS[op].some(kw => present.has(kw))
   );
@@ -371,22 +406,24 @@ async function solveChallenge(challengeData) {
     console.log('[ChallengeSolver] Deterministic parse not confident:', JSON.stringify(parsed));
   }
 
-  // Keep this framed as what it is - an arithmetic word problem in stylized
-  // text. Wording it as "decode the obfuscated verification challenge" reads
-  // as a request to defeat a bot check and draws a refusal (stop_reason:
-  // "refusal", empty content), which is how every sample silently failed
-  // during development.
+  // Send the NORMALIZED text only. Including the raw obfuscated string makes
+  // the request read as CAPTCHA-solving and draws a refusal (stop_reason:
+  // "refusal", empty content) - measured at 5/5 refusals with it versus 5/5
+  // correct without, on the challenge that failed 2026-08-27 20:11.
+  //
+  // Normalizer glitches do not justify sending the raw text as a safety net:
+  // the model answered correctly 3/3 even on a deliberately mangled
+  // normalization ("lobsters wims ... snapps"), and a raw-text fallback would
+  // simply refuse every time.
   const prompt =
     'Solve this arithmetic word problem.\n\n' +
-    'It is written in a stylized way: letters are randomly capitalized and ' +
-    'sometimes repeated, and some words are broken up by stray spaces or ' +
-    'punctuation. Read each word back to its normal form before computing - for ' +
-    'example "ThIrTy] FiV e" is the number thirty-five, and "TwEeLvE" is twelve. ' +
-    'Take care not to overlook a fragment that was split off from its word.\n\n' +
-    `Problem: ${challengeText}\n` +
-    `The same problem with most of the styling removed: ${normalized}\n\n` +
+    `Problem: ${normalized}\n\n` +
+    'The wording is chatty and repetitive; ignore filler words and use the ' +
+    'quantities and the operator between them.\n' +
     (instructions || 'Give the number to 2 decimal places.') + '\n' +
     'Respond with ONLY the final number.';
+
+  _lastPrompt = prompt;
 
   const samples = await Promise.all(
     Array.from({ length: SOLVE_SAMPLES }, async () => {
@@ -478,11 +515,19 @@ function classifyVerifyResponse(status, data) {
  * oracle: on "Incorrect answer" we advance to the next distinct candidate
  * rather than giving up. Bounded by MAX_CANDIDATES and by the challenge's own
  * ~5 minute expires_at.
+ *
+ * If the list runs dry while budget and time remain, `options.resolve` is
+ * called for a fresh set of candidates. That matters when the model refuses
+ * every sample and the first pass yields only the deterministic answer: one
+ * rejection would otherwise end the attempt with minutes left on the clock.
+ * The budget counts answers actually POSTed, not solve passes.
  * @param {Object} challengeData - Raw challenge object from Moltbook response
  * @param {string[]} candidates - Ordered candidate answers
+ * @param {Object} [options]
+ * @param {Function} [options.resolve] - async () => string[], a fresh solve
  * @returns {Promise<Object>} API response data
  */
-async function submitChallengeAnswer(challengeData, candidates) {
+async function submitChallengeAnswer(challengeData, candidates, options = {}) {
   const apiKey = process.env.MOLTBOOK_API_KEY;
   const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   const { verificationCode, expiresAt } = getVerificationBlock(challengeData);
@@ -491,10 +536,12 @@ async function submitChallengeAnswer(challengeData, candidates) {
   const deadline = parseExpiry(expiresAt);
   const contentId = challengeData.id || challengeData.content_id || null;
 
-  const list = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean);
+  const queue = (Array.isArray(candidates) ? candidates : [candidates]).filter(Boolean);
   const tried = [];
+  let reSolved = false;
 
-  for (const answer of list) {
+  while (queue.length && tried.length < MAX_CANDIDATES) {
+    const answer = queue.shift();
     if (tried.includes(answer)) continue;
     if (deadline && Date.now() > deadline - EXPIRY_MARGIN_MS) {
       console.warn('[ChallengeSolver] Challenge window closed before all candidates were tried');
@@ -550,6 +597,25 @@ async function submitChallengeAnswer(challengeData, candidates) {
     // An expired challenge or a rejected payload shape will fail identically
     // for every candidate, so stop rather than burn the rest of the list.
     if (!advanceCandidate) break;
+
+    const budgetLeft = tried.length < MAX_CANDIDATES;
+    const timeLeft = !deadline || Date.now() < deadline - RESOLVE_MARGIN_MS;
+    if (!queue.length && !reSolved && options.resolve && budgetLeft && timeLeft) {
+      reSolved = true;
+      console.log('[ChallengeSolver] Candidates exhausted with time left - re-solving');
+      try {
+        const fresh = await options.resolve();
+        const added = (fresh || []).filter(a => a && !tried.includes(a));
+        if (added.length) {
+          console.log(`[ChallengeSolver] Re-solve produced: ${added.join(', ')}`);
+          queue.push(...added);
+        } else {
+          console.warn('[ChallengeSolver] Re-solve produced no new answers');
+        }
+      } catch (e) {
+        console.warn('[ChallengeSolver] Re-solve failed:', e.message);
+      }
+    }
   }
 
   const debugInfo =
@@ -581,7 +647,9 @@ async function submitChallengeAnswer(challengeData, candidates) {
  */
 async function solveChallengeAndSubmit(challengeData) {
   const { candidates } = await solveChallenge(challengeData);
-  return submitChallengeAnswer(challengeData, candidates);
+  return submitChallengeAnswer(challengeData, candidates, {
+    resolve: async () => (await solveChallenge(challengeData)).candidates
+  });
 }
 
 module.exports = {
@@ -592,5 +660,6 @@ module.exports = {
   _solveChallenge: solveChallenge,
   _submitChallengeAnswer: submitChallengeAnswer,
   _classifyVerifyResponse: classifyVerifyResponse,
-  _parseExpiry: parseExpiry
+  _parseExpiry: parseExpiry,
+  _lastPrompt: () => _lastPrompt
 };
