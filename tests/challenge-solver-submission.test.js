@@ -32,6 +32,9 @@ const BAD_SHAPE = () => reject(400, {
   error: 'Bad Request'
 });
 const OK = () => Promise.resolve({ status: 200, data: { success: true, verified: true } });
+// Observed 2026-08-28 on every attempt after the first, including the one that
+// carried the correct answer.
+const CONFLICT = () => reject(409, { statusCode: 409, message: 'Incorrect answer', success: false });
 
 const challengeData = {
   id: 'e7c0338a-5fc8-41bd-b3c1-66459f0ad991',
@@ -230,5 +233,47 @@ describe('re-solving when candidates run out', () => {
     const resolve = jest.fn().mockRejectedValue(new Error('model down'));
     await expect(submitChallengeAnswer(challengeData, ['22.00'], { resolve }))
       .rejects.toThrow(/verification failed/i);
+  });
+});
+
+describe('a 409 means the attempt is already spent', () => {
+  beforeEach(() => {
+    axios.post.mockReset();
+    jest.spyOn(console, 'log').mockImplementation(() => {});
+    jest.spyOn(console, 'warn').mockImplementation(() => {});
+    jest.spyOn(console, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('classifies 409 as a conflict even when the body says "Incorrect answer"', () => {
+    expect(classify(409, { message: 'Incorrect answer', success: false })).toBe('conflict');
+    expect(classify(409, { success: false })).toBe('conflict');
+    // The same body at 400 is still a wrong answer.
+    expect(classify(400, { message: 'Incorrect answer', success: false })).toBe('incorrect');
+  });
+
+  it('stops on a 409 instead of spending the remaining candidates', async () => {
+    axios.post.mockImplementationOnce(INCORRECT).mockImplementationOnce(CONFLICT);
+    await expect(submitChallengeAnswer(challengeData, ['66.00', '40.00', '99.00']))
+      .rejects.toThrow(/verification failed/i);
+    expect(axios.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-solve after a 409', async () => {
+    axios.post.mockImplementationOnce(CONFLICT);
+    const resolve = jest.fn().mockResolvedValue(['40.00']);
+    await expect(submitChallengeAnswer(challengeData, ['66.00'], { resolve }))
+      .rejects.toThrow(/verification failed/i);
+    expect(resolve).not.toHaveBeenCalled();
+  });
+
+  it('logs the rejection body so the 409 wording is captured', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    axios.post.mockImplementationOnce(CONFLICT);
+    await expect(submitChallengeAnswer(challengeData, ['66.00'])).rejects.toThrow();
+    const logged = warn.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(logged).toContain('Rejected (conflict, 409)');
+    expect(logged).toContain('Incorrect answer');
   });
 });

@@ -100,27 +100,58 @@ describe('challenge-solver candidate generation', () => {
     expect((await solveChallenge(modelLed)).candidates[0]).toBe('48.00');
   });
 
+  // "gains" makes the parser confident: 35 + 12 = 47.
+  const parserLed = {
+    verification: {
+      verification_code: 'abc123',
+      challenge_text: 'L]oB-sT{eR} ThIrTy] FiV e N]eWtO/ns AnD GaAiN s TwEeLvE N]eWtO/ns'
+    }
+  };
+
   it('leads with the deterministic parse when the model samples all disagree', async () => {
-    // "gains" makes the parser confident: 35 + 12 = 47.
     say('42.00', '45.00', '50.00');
-    const { candidates, deterministic } = await solveChallenge({
-      verification: {
-        verification_code: 'abc123',
-        challenge_text: 'L]oB-sT{eR} ThIrTy] FiV e N]eWtO/ns AnD GaAiN s TwEeLvE N]eWtO/ns'
-      }
-    });
+    const { candidates, deterministic } = await solveChallenge(parserLed);
     expect(deterministic).toBe('47.00');
     expect(candidates[0]).toBe('47.00');
   });
 
+  // 2026-08-28: three samples agreed on 66.00 while the parser had the right
+  // answer. The first submitted answer is effectively the only one evaluated,
+  // so a confident parse now goes first even against a full model consensus.
+  it('leads with the parser even when the model reaches 3-of-3 consensus', async () => {
+    say('66.00', '66.00', '66.00');
+    const { candidates } = await solveChallenge(parserLed);
+    expect(candidates[0]).toBe('47.00');
+    expect(candidates).toContain('66.00'); // kept as a fallback
+  });
+
+  it('warns when the parser and the model disagree', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    say('66.00', '66.00', '66.00');
+    await solveChallenge(parserLed);
+    const logged = warn.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(logged).toContain('Parser and model disagree');
+    expect(logged).toContain('parser=47.00');
+    expect(logged).toContain('model=66.00');
+  });
+
+  it('does not warn when they agree', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    say('47.00', '47.00', '47.00');
+    await solveChallenge(parserLed);
+    expect(warn.mock.calls.map(c => c.join(' ')).join('\n')).not.toContain('disagree');
+  });
+
+  it('still leads with the model majority when the parser is not confident', async () => {
+    say('48.00', '48.00', '12.00');
+    const { candidates, deterministic } = await solveChallenge(modelLed);
+    expect(deterministic).toBeNull();
+    expect(candidates[0]).toBe('48.00');
+  });
+
   it('collapses to a single candidate when parser and model agree', async () => {
     say('47.00', '47.00', '47.00');
-    const { candidates } = await solveChallenge({
-      verification: {
-        verification_code: 'abc123',
-        challenge_text: 'L]oB-sT{eR} ThIrTy] FiV e N]eWtO/ns AnD GaAiN s TwEeLvE N]eWtO/ns'
-      }
-    });
+    const { candidates } = await solveChallenge(parserLed);
     expect(candidates).toEqual(['47.00']);
   });
 
