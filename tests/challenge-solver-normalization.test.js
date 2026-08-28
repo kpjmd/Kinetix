@@ -19,6 +19,13 @@ const LIVE_CHALLENGE =
 
 // ...and from the 2026-08-27 20:11 heartbeat, which answered 22.00 (20 + 2)
 // for a problem whose "*" had been stripped as if it were injected noise.
+// From the 2026-08-28 20:00 heartbeat. "fOuR tEeN" normalized to "four ten"
+// because canon("teen") === "ten", a real vocabulary word, so the rejoin guard
+// treated both halves as standalone and never formed "fourteen".
+const LIVE_FOURTEEN =
+  "A] lO b-StEr'S^ cLaW- eXeRrT S^tWeN tYy sIiX- nEwToNs] , aNd- ThE/ oThEr^ " +
+  'cLaW- eXeRrTs^ fOuR tEeN- nEeWtOnS~ hOw/ mAnY^ nEwToNs- ToTaL? umm lxobqstwer';
+
 const LIVE_MULTIPLY =
   'Lo]bS-tEr S^wImS Um, LiKe, LoOooObSsStEr, AnD iT sNaPpS ClAwS LiKe ThIs: ' +
   'C lA]w F^oRcE Is TwEnTy ~ NeWtOnS * TwO { ClAwS } Um, HoW/ MuCh ToTaL FoRcE?';
@@ -154,5 +161,28 @@ describe('parseArithmetic operator symbols', () => {
 
   it('is not confident when two different symbols appear', () => {
     expect(solve('two + two * two').confident).toBe(false);
+  });
+});
+
+describe('compound number words split by a space', () => {
+  it('rebuilds "fourteen" from the live 2026-08-28 challenge', () => {
+    expect(normalizeChallengeText(LIVE_FOURTEEN)).toContain('exerts fourteen newtons');
+  });
+
+  it('solves that challenge as 40, not 66', () => {
+    expect(solve(LIVE_FOURTEEN)).toMatchObject({ value: 40, op: 'add', confident: true });
+  });
+
+  it('joins a teen even though its halves both resolve on their own', () => {
+    // "four" is vocabulary and "teen" canon-resolves to "ten", so the
+    // stand-alone guard would otherwise skip this join.
+    expect(normalizeChallengeText('fOuR tEeN')).toBe('fourteen');
+    expect(normalizeChallengeText('sIiX tEeN')).toBe('sixteen');
+    expect(normalizeChallengeText('tHiR tEeN')).toBe('thirteen');
+  });
+
+  it('still refuses to fuse number words that form no single word', () => {
+    expect(normalizeChallengeText('ThIrTy FiV e')).toBe('thirty five');
+    expect(normalizeChallengeText('TwO HuNdReD FiFtY')).toBe('two hundred fifty');
   });
 });

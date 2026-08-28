@@ -198,7 +198,13 @@ function normalizeChallengeText(raw) {
       if (parts.some(p => /\d/.test(p) || SYMBOL_OPS[p])) continue;
       const resolved = resolveToken(parts.join(''));
       if (!resolved) continue;
-      if (parts.every(p => resolveToken(p))) continue;
+      // A join that spells a number word always wins, even when both halves
+      // look like standalone words. canon() collapses repeats, so
+      // canon("teen") === "ten" and "ten" is real vocabulary - which made
+      // "fOuR tEeN" resolve to "four ten" instead of "fourteen" and cost a
+      // challenge on 2026-08-28. NUMBER_WORDS holds no compound entries, so
+      // "thirty five" and "two hundred fifty" have nothing to fuse into.
+      if (!NUMBER_WORDS[resolved] && parts.every(p => resolveToken(p))) continue;
       joined = { word: resolved, span };
       break;
     }
@@ -461,10 +467,22 @@ async function solveChallenge(challengeData) {
     if (c > majorityCount) { majority = a; majorityCount = c; }
   }
 
-  // A real consensus outranks the parser; a 3-way split does not.
-  const ordered = majorityCount >= 2
-    ? [majority, deterministic, ...answers]
-    : [deterministic, majority, ...answers];
+  // The confident parser leads. The first submitted answer is effectively the
+  // only one evaluated (see classifyVerifyResponse on 409), and since the model
+  // is now given only the normalized text, any normalizer damage is
+  // unrecoverable for it - which is exactly how 2026-08-28 was lost, the parser
+  // reading 40.00 while three model samples agreed on the wrong 66.00.
+  const ordered = deterministic
+    ? [deterministic, majority, ...answers]
+    : [majority, ...answers];
+
+  // Disagreement is the best early warning that normalization is damaged.
+  if (deterministic && majority && deterministic !== majority) {
+    console.warn(
+      `[ChallengeSolver] Parser and model disagree: parser=${deterministic} model=${majority} ` +
+      `(${majorityCount}/${answers.length}) - check the normalized text above for damage`
+    );
+  }
 
   const candidates = [];
   for (const c of ordered) {
@@ -491,12 +509,20 @@ async function solveChallenge(challengeData) {
  *  - wrong payload: 400 { message: ["verification_code must be a string"] }
  * The old code treated both as "try a different payload", so an incorrect
  * answer silently burned the attempt instead of triggering a re-solve.
- * @returns {'verified'|'incorrect'|'shape'|'expired'|'error'}
+ *
+ * A 409 means the challenge is no longer accepting answers. Observed
+ * 2026-08-28: a wrong first answer got 400 "Incorrect answer", then the
+ * CORRECT answer got 409, as did a third attempt - so the first submission is
+ * the only one evaluated. Without this branch a 409 fell through to
+ * 'incorrect' on success:false, which kept spending candidates against a
+ * closed challenge and logged a right answer as wrong.
+ * @returns {'verified'|'incorrect'|'conflict'|'shape'|'expired'|'error'}
  */
 function classifyVerifyResponse(status, data) {
   const message = data && data.message;
   const text = Array.isArray(message) ? message.join('; ') : String(message || data?.error || '');
 
+  if (status === 409) return 'conflict';
   if (Array.isArray(message)) return 'shape';
   if (/expired|not found|no pending|already verified/i.test(text)) {
     return /already verified/i.test(text) ? 'verified' : 'expired';
@@ -583,13 +609,22 @@ async function submitChallengeAnswer(challengeData, candidates, options = {}) {
         console.log('[ChallengeSolver] Verified:', JSON.stringify(data));
         return data;
       }
+      // Log every rejection body: the exact 409 wording is still unknown, and
+      // this is what will confirm or correct the one-attempt-per-challenge
+      // reading on the next occurrence.
+      console.warn(`[ChallengeSolver] Rejected (${verdict}, ${status}):`, JSON.stringify(data));
+
       if (verdict === 'incorrect') { advanceCandidate = true; break; }
+      if (verdict === 'conflict') {
+        console.warn('[ChallengeSolver] Challenge no longer accepts answers - the first submission was the one that counted');
+        advanceCandidate = false;
+        break;
+      }
       if (verdict === 'expired') {
         console.warn('[ChallengeSolver] Challenge expired server-side, aborting');
         advanceCandidate = false;
         break;
       }
-      console.warn(`[ChallengeSolver] Rejected (${verdict}):`, JSON.stringify(data));
       // 'shape'/'error' fall through to the next payload shape for this answer.
     }
 
