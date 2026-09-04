@@ -118,7 +118,7 @@ describe('challenge-solver candidate generation', () => {
   // 2026-08-28: three samples agreed on 66.00 while the parser had the right
   // answer. The first submitted answer is effectively the only one evaluated,
   // so a confident parse now goes first even against a full model consensus.
-  it('leads with the parser even when the model reaches 3-of-3 consensus', async () => {
+  it('leads with a strong parse even when the model reaches 3-of-3 consensus', async () => {
     say('66.00', '66.00', '66.00');
     const { candidates } = await solveChallenge(parserLed);
     expect(candidates[0]).toBe('47.00');
@@ -140,6 +140,39 @@ describe('challenge-solver candidate generation', () => {
     say('47.00', '47.00', '47.00');
     await solveChallenge(parserLed);
     expect(warn.mock.calls.map(c => c.join(' ')).join('\n')).not.toContain('disagree');
+  });
+
+  // A weak parse (filler operation, units unrecognized) must yield to a model
+  // consensus - this is the 2026-09-03 shape, where the parser said 34.00 and
+  // the model said 64.00 five times out of five.
+  const weakParse = {
+    verification: {
+      verification_code: 'abc123',
+      challenge_text: 'ThE] lOoObSst-Er- ClAw^ FoR cE] Is^ tH iR tY tWo~ nOoToNs/ xBy^ tWo, WhAt] Is^ tHe ToTaL- FoR cE?'
+    }
+  };
+
+  it('lets a model consensus outrank a weak parse', async () => {
+    say('64.00', '64.00', '64.00');
+    const { candidates, deterministic } = await solveChallenge(weakParse);
+    expect(deterministic).toBe('34.00');
+    expect(candidates[0]).toBe('64.00');
+    expect(candidates).toContain('34.00'); // kept as a fallback
+  });
+
+  it('still uses a weak parse when the model reaches no consensus', async () => {
+    say('11.00', '22.00', '33.00');
+    const { candidates } = await solveChallenge(weakParse);
+    expect(candidates[0]).toBe('34.00');
+  });
+
+  it('names which solver led in the disagreement warning', async () => {
+    const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    say('64.00', '64.00', '64.00');
+    await solveChallenge(weakParse);
+    const logged = warn.mock.calls.map(c => c.join(' ')).join('\n');
+    expect(logged).toContain('parser=34.00 (weak)');
+    expect(logged).toContain('leading with model');
   });
 
   it('still leads with the model majority when the parser is not confident', async () => {

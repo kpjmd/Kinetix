@@ -186,3 +186,47 @@ describe('compound number words split by a space', () => {
     expect(normalizeChallengeText('TwO HuNdReD FiFtY')).toBe('two hundred fifty');
   });
 });
+
+// 2026-09-03: the obfuscator began substituting letters rather than repeating
+// them, which canon() cannot undo. "nOoToNs" became "nootons" (unit lost) and
+// "xBy" became "xby" (operator word lost), so the parse fell back to the
+// "total" filler and answered 32 + 2 = 34.00 for a 32 x 2 = 64.00 problem.
+// Since only the first answer is evaluated, the parse must not lead here.
+const LIVE_SUBSTITUTED =
+  'ThE] lOoObSst-Er- ClAw^ FoR cE] Is^ tH iR tY tWo~ nOoToNs/ xBy^ tWo, ' +
+  'WhAt] Is^ tHe ToTaL- FoR cE?';
+
+describe('parse confidence tiers', () => {
+  it('grades the 2026-09-03 challenge weak: filler operation, no units', () => {
+    const result = solve(LIVE_SUBSTITUTED);
+    expect(result).toMatchObject({
+      value: 34, confident: true, tier: 'weak', via: 'filler', unitBearing: 0
+    });
+  });
+
+  it('grades a symbol-derived operation strong even without units', () => {
+    const result = solve(LIVE_MULTIPLY);
+    expect(result).toMatchObject({ tier: 'strong', via: 'symbol' });
+    expect(result.unitBearing).toBeLessThan(2);
+  });
+
+  it('grades a keyword-derived operation strong', () => {
+    expect(solve(LIVE_CHALLENGE)).toMatchObject({ tier: 'strong', via: 'keyword' });
+  });
+
+  it('grades filler strong when both quantities carry recognized units', () => {
+    expect(solve(LIVE_FOURTEEN)).toMatchObject({
+      tier: 'strong', via: 'filler', unitBearing: 2
+    });
+  });
+
+  it('reports no tier when the parse is not confident', () => {
+    expect(solve('lobster gains ten newtons')).toMatchObject({ confident: false, tier: null });
+  });
+
+  // Recovering "nootons" -> "newtons" would give two unit-bearing operands,
+  // promote this parse to strong, and put the wrong 34.00 first again.
+  it('does not fuzzy-recover a letter-substituted unit', () => {
+    expect(normalizeChallengeText('nOoToNs')).toBe('nootons');
+  });
+});
