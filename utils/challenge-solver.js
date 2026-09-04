@@ -266,7 +266,12 @@ function extractOperands(tokens) {
 /**
  * Determine the operation from keyword families. Strong signals win outright;
  * weak filler ("and", "total") is only consulted when no strong signal exists.
- * @returns {string|null} 'add' | 'sub' | 'mul' | 'div' | null
+ *
+ * `via` reports HOW the operation was decided, because that is the difference
+ * between a reading worth submitting first and a guess. "and"/"total" appear
+ * in nearly every challenge, so a filler-derived operation is really just the
+ * default when no operator word survived obfuscation.
+ * @returns {{op: string|null, via: 'symbol'|'keyword'|'filler'|null}}
  */
 function detectOperation(tokens) {
   const present = new Set(tokens);
@@ -275,29 +280,46 @@ function detectOperation(tokens) {
   // every keyword — "and"/"total" filler appears in nearly every challenge, so
   // without this a "twenty newtons * two claws" problem is read as addition.
   const symbols = Object.keys(SYMBOL_OPS).filter(sym => present.has(sym));
-  if (symbols.length === 1) return SYMBOL_OPS[symbols[0]];
-  if (symbols.length > 1) return null;
+  if (symbols.length === 1) return { op: SYMBOL_OPS[symbols[0]], via: 'symbol' };
+  if (symbols.length > 1) return { op: null, via: null };
 
   const strong = Object.keys(STRONG_OPS).filter(op =>
     STRONG_OPS[op].some(kw => present.has(kw))
   );
-  if (strong.length === 1) return strong[0];
-  if (strong.length > 1) return null; // genuinely ambiguous - defer to the model
+  if (strong.length === 1) return { op: strong[0], via: 'keyword' };
+  if (strong.length > 1) return { op: null, via: null }; // ambiguous - defer to the model
 
   const weak = Object.keys(WEAK_OPS).filter(op =>
     WEAK_OPS[op].some(kw => present.has(kw))
   );
-  return weak.length === 1 ? weak[0] : null;
+  return weak.length === 1 ? { op: weak[0], via: 'filler' } : { op: null, via: null };
 }
 
 /**
  * Deterministically solve a normalized two-operand challenge.
  *
- * This is a cross-check against the model, not the sole authority: it only
- * reports `confident` for the simple shape Moltbook actually uses (exactly two
- * unit-bearing quantities and one unambiguous operation).
+ * This is a cross-check against the model, not the sole authority. `tier`
+ * grades how much the reading can be trusted, which decides who goes first:
+ *
+ *  - 'strong': the operation came from an explicit symbol or a real keyword,
+ *    OR both quantities carried a recognized unit.
+ *  - 'weak': the operation fell back to "and"/"total" filler AND the units
+ *    were not recognized either — nothing in the text actually confirmed the
+ *    reading.
+ *
+ * The distinction is not academic. 2026-09-03: obfuscation substituted letters
+ * rather than repeating them ("nOoToNs" -> "nootons", "xBy" -> "xby"), so the
+ * unit and the operator word were both lost. The parse still looked confident
+ * and answered 32 + 2 = 34.00 for a problem that was 32 x 2 = 64.00, which the
+ * model had right 5/5. Since only the first answer is ever evaluated, leading
+ * with that parse cost the challenge.
+ *
+ * Deliberately NOT fixed by fuzzy-matching "nootons" back to "newtons": that
+ * would give two unit-bearing operands, promote the parse to 'strong', and put
+ * the wrong 34.00 first again.
  * @param {string} normalized - Output of normalizeChallengeText
- * @returns {{value: number|null, confident: boolean, operands: number[], op: string|null}}
+ * @returns {{value: number|null, confident: boolean, tier: 'strong'|'weak'|null,
+ *            via: string|null, unitBearing: number, operands: number[], op: string|null}}
  */
 function parseArithmetic(normalized) {
   const tokens = String(normalized || '').split(/\s+/).filter(Boolean);
@@ -310,12 +332,14 @@ function parseArithmetic(normalized) {
   );
   const operands = unitBearing.length >= 2 ? unitBearing : all;
 
-  const op = detectOperation(tokens);
+  const { op, via } = detectOperation(tokens);
   const values = operands.map(o => o.value);
+  const unconfident = {
+    value: null, confident: false, tier: null, via,
+    unitBearing: unitBearing.length, operands: values, op
+  };
 
-  if (operands.length !== 2 || !op) {
-    return { value: null, confident: false, operands: values, op };
-  }
+  if (operands.length !== 2 || !op) return unconfident;
 
   const [a, b] = values;
   let value = null;
@@ -324,10 +348,18 @@ function parseArithmetic(normalized) {
   else if (op === 'mul') value = a * b;
   else if (op === 'div') value = b === 0 ? null : a / b;
 
-  if (value === null || !Number.isFinite(value)) {
-    return { value: null, confident: false, operands: values, op };
-  }
-  return { value, confident: true, operands: values, op };
+  if (value === null || !Number.isFinite(value)) return unconfident;
+
+  const corroborated = via === 'symbol' || via === 'keyword' || unitBearing.length >= 2;
+  return {
+    value,
+    confident: true,
+    tier: corroborated ? 'strong' : 'weak',
+    via,
+    unitBearing: unitBearing.length,
+    operands: values,
+    op
+  };
 }
 
 // ===== Challenge extraction =====
@@ -407,7 +439,10 @@ async function solveChallenge(challengeData) {
   const parsed = parseArithmetic(normalized);
   const deterministic = parsed.confident ? parsed.value.toFixed(2) : null;
   if (deterministic) {
-    console.log(`[ChallengeSolver] Deterministic parse: ${parsed.operands.join(` ${parsed.op} `)} = ${deterministic}`);
+    console.log(
+      `[ChallengeSolver] Deterministic parse: ${parsed.operands.join(` ${parsed.op} `)} = ${deterministic} ` +
+      `(${parsed.tier}, op via ${parsed.via}, ${parsed.unitBearing} unit-bearing)`
+    );
   } else {
     console.log('[ChallengeSolver] Deterministic parse not confident:', JSON.stringify(parsed));
   }
@@ -467,20 +502,24 @@ async function solveChallenge(challengeData) {
     if (c > majorityCount) { majority = a; majorityCount = c; }
   }
 
-  // The confident parser leads. The first submitted answer is effectively the
-  // only one evaluated (see classifyVerifyResponse on 409), and since the model
-  // is now given only the normalized text, any normalizer damage is
-  // unrecoverable for it - which is exactly how 2026-08-28 was lost, the parser
-  // reading 40.00 while three model samples agreed on the wrong 66.00.
-  const ordered = deterministic
+  // Only the first answer is ever evaluated (see classifyVerifyResponse on
+  // 409), so ordering decides the outcome. A 'strong' parse leads: something in
+  // the text corroborated it, and the model cannot recover from normalizer
+  // damage now that it only sees normalized text. A 'weak' parse does not:
+  // nothing confirmed the operation or the units, which is the shape that lost
+  // 2026-09-03 (parser 34.00 vs model 64.00, model right).
+  // majorityCount < 2 means the samples split three ways, which is not a
+  // consensus - a weak parse still beats three disagreeing guesses.
+  const parserLeads = deterministic && (parsed.tier === 'strong' || majorityCount < 2);
+  const ordered = parserLeads
     ? [deterministic, majority, ...answers]
-    : [majority, ...answers];
+    : [majority, deterministic, ...answers];
 
-  // Disagreement is the best early warning that normalization is damaged.
   if (deterministic && majority && deterministic !== majority) {
     console.warn(
-      `[ChallengeSolver] Parser and model disagree: parser=${deterministic} model=${majority} ` +
-      `(${majorityCount}/${answers.length}) - check the normalized text above for damage`
+      `[ChallengeSolver] Parser and model disagree: parser=${deterministic} (${parsed.tier}) ` +
+      `model=${majority} (${majorityCount}/${answers.length}) - leading with ` +
+      `${parserLeads ? 'parser' : 'model'}`
     );
   }
 

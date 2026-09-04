@@ -246,6 +246,18 @@ describe('a 409 means the attempt is already spent', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  // The real body, captured 2026-09-03 once rejection logging was added. It
+  // states the one-attempt rule outright, confirming what the status change
+  // had only implied.
+  it('classifies the real "Already answered" 409', () => {
+    expect(classify(409, {
+      statusCode: 409,
+      message: 'Already answered',
+      success: false,
+      hint: 'This verification code has already been used. Create new content to get a fresh challenge.'
+    })).toBe('conflict');
+  });
+
   it('classifies 409 as a conflict even when the body says "Incorrect answer"', () => {
     expect(classify(409, { message: 'Incorrect answer', success: false })).toBe('conflict');
     expect(classify(409, { success: false })).toBe('conflict');
