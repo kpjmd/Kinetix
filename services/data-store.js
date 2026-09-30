@@ -504,14 +504,36 @@ async function saveX402Payment(paymentData) {
     amount: paymentData.amount,
     currency: paymentData.currency,
     tier: paymentData.tier,
-    status: 'confirmed', // pending/confirmed/failed/refunded
+    // Written by the paid handler, which runs BEFORE @x402/express settles
+    // the payment. updateX402Payment records the outcome once it is known.
+    status: paymentData.status || 'pending_settlement', // pending_settlement/settled/settlement_failed/refunded
     transaction_hash: paymentData.transaction_hash,
-    created_at: new Date().toISOString(),
-    confirmed_at: new Date().toISOString()
+    created_at: new Date().toISOString()
   };
 
   await fs.writeFile(filePath, JSON.stringify(payment, null, 2), 'utf-8');
   return payment;
+}
+
+/**
+ * Merge fields into a saved x402 payment record (e.g. the settlement outcome).
+ * @param {string} paymentId - payment_id returned by saveX402Payment
+ * @param {Object} patch - fields to set
+ * @returns {Promise<Object|null>} the updated record, or null if not found
+ */
+async function updateX402Payment(paymentId, patch) {
+  if (!/^pay_x402_[A-Za-z0-9]+$/.test(paymentId || '')) return null;
+  const filePath = path.join(X402_PAYMENTS_DIR, `${paymentId}.json`);
+  let payment;
+  try {
+    payment = JSON.parse(await fs.readFile(filePath, 'utf-8'));
+  } catch (error) {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  }
+  const updated = { ...payment, ...patch, updated_at: new Date().toISOString() };
+  await fs.writeFile(filePath, JSON.stringify(updated, null, 2), 'utf-8');
+  return updated;
 }
 
 /**
@@ -602,6 +624,7 @@ module.exports = {
   loadEasSubmission,
   listEasSubmissions,
   saveX402Payment,
+  updateX402Payment,
   loadX402Payment,
   listX402Payments
 };
