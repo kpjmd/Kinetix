@@ -547,7 +547,7 @@ const HEX64 = /^[0-9a-f]{64}$/;
  */
 function normalizeNostrPubkey(value) {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new Error('Nostr pubkey is required');
+    throw pubkeyError('PUBKEY_MISSING', 'Nostr pubkey is required');
   }
 
   const trimmed = value.trim();
@@ -559,14 +559,18 @@ function normalizeNostrPubkey(value) {
       // library default change cannot silently start rejecting valid input.
       decoded = bech32.decode(trimmed.toLowerCase(), 90);
     } catch (error) {
-      throw new Error(`Invalid npub (bech32 decode failed): ${error.message}`);
+      // PUBKEY_CORRUPTED: shaped like an npub but truncated, padded or
+      // mistyped. Callers facing a buyer must not echo this message — the
+      // library's `expected "<checksum>"` text reads to an LLM as an
+      // instruction, and one buyer prepended it to the key three times.
+      throw pubkeyError('PUBKEY_CORRUPTED', `Invalid npub (bech32 decode failed): ${error.message}`);
     }
     if (decoded.prefix !== 'npub') {
-      throw new Error(`Expected an npub, got prefix "${decoded.prefix}"`);
+      throw pubkeyError('PUBKEY_NOT_NPUB', `Expected an npub, got prefix "${decoded.prefix}"`);
     }
     const bytes = bech32.fromWords(decoded.words);
     if (bytes.length !== 32) {
-      throw new Error(`Invalid npub: expected 32 bytes, got ${bytes.length}`);
+      throw pubkeyError('PUBKEY_CORRUPTED', `Invalid npub: expected 32 bytes, got ${bytes.length}`);
     }
     return Buffer.from(bytes).toString('hex');
   }
@@ -576,9 +580,14 @@ function normalizeNostrPubkey(value) {
     return bare;
   }
 
-  throw new Error(
+  throw pubkeyError(
+    'PUBKEY_NOT_A_KEY',
     `Invalid Nostr pubkey "${trimmed}": expected an npub1... or a 64-character hex key`
   );
+}
+
+function pubkeyError(code, message) {
+  return Object.assign(new Error(message), { code });
 }
 
 /**
@@ -601,10 +610,15 @@ function normalizeNostrPubkey(value) {
  *   success" branch is exactly the silent under-count described above.
  *
  * @param {string} hexPubkey - 64-char hex author pubkey
- * @param {object} options - { since, until } unix seconds, { limit } per relay
+ * @param {object} options - { since, until } unix seconds, { limit } per relay,
+ *   { timeoutMs, attempts } to bound a caller that is holding a live request
+ *   open (the paid route's baseline snapshot) rather than a background tick
  * @returns {Promise<{events: array, relaysOk: number, relaysTotal: number}>}
  */
-async function getEventsByAuthor(hexPubkey, { since, until, limit = 500 } = {}) {
+async function getEventsByAuthor(
+  hexPubkey,
+  { since, until, limit = 500, timeoutMs = CONFIG.timeout, attempts = 2 } = {}
+) {
   if (!HEX64.test(hexPubkey || '')) {
     // Guarded before the spawn so a bad value never becomes an argv element.
     throw new Error(`getEventsByAuthor requires a 64-char hex pubkey, got "${hexPubkey}"`);
@@ -616,11 +630,10 @@ async function getEventsByAuthor(hexPubkey, { since, until, limit = 500 } = {}) 
   if (Number.isFinite(until)) args.push('-u', String(Math.floor(until)));
   args.push('-l', String(limit), ...CONFIG.relays);
 
-  const attempts = 2;
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      const result = await spawnNak(args, CONFIG.timeout);
+      const result = await spawnNak(args, timeoutMs);
       return parseAuthorEvents(result, limit);
     } catch (error) {
       lastError = error;

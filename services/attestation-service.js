@@ -15,6 +15,9 @@ const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/;
 // coincidence. See the "Schema history" section of REPUTATION_RECEIPT.MD.
 const RECEIPT_VERSION = '2.0.0';
 
+// Separately versioned from receipts: a different document with its own shape.
+const CERTIFICATE_VERSION = '1.0.0';
+
 class AttestationService {
   constructor() {
     this.signingWallet = null;
@@ -229,6 +232,32 @@ class AttestationService {
       canonical_hash: receiptHash,
       signed_at: new Date().toISOString()
     };
+  }
+
+  /**
+   * Issue a signed commitment certificate: the terms a buyer paid for, signed
+   * at purchase with the same key and scheme as the eventual receipt.
+   *
+   * This is what a paid call delivers immediately. A receipt can only exist
+   * once the monitoring window closes, days later, and OKX AI delisted this
+   * service because a buyer who paid got back nothing but an id. The
+   * certificate is independently checkable the moment it is returned
+   * (verifyReceipt works on it unchanged, since signing is over the canonical
+   * payload regardless of document type).
+   */
+  async issueCertificate(terms) {
+    if (!this.signingWallet) {
+      throw new Error('AttestationService not initialized');
+    }
+    const certificate = {
+      certificate_version: CERTIFICATE_VERSION,
+      type: 'kinetix_commitment_certificate',
+      ...terms,
+      // Same issuer.pubkey field as receipts, so verifyReceipt() checks both.
+      issuer: { name: 'Kinetix', pubkey: this.signingWallet.address }
+    };
+    certificate.signatures = await this._signReceipt(certificate);
+    return certificate;
   }
 
   /**

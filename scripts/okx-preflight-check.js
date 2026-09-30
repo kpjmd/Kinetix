@@ -14,7 +14,7 @@
  * Read-only: sends no payment and broadcasts no transaction.
  *
  * Usage:
- *   node scripts/okx-preflight-check.js https://kinetix-x402.up.railway.app
+ *   node scripts/okx-preflight-check.js https://kinetix-x402-production.up.railway.app
  */
 
 const EXPECTED_PAY_TO = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
@@ -147,6 +147,13 @@ async function checkPaymentChallenge() {
     return;
   }
   check('challenge decodes', true, `x402Version=${challenge.x402Version}`);
+
+  // Behind Railway's TLS proxy, without `trust proxy` this read http://, and
+  // a client following it was 301'd — turning a paid POST into a body-less GET.
+  if (baseUrl.startsWith('https://')) {
+    const resourceUrl = challenge.resource?.url || '';
+    check('challenge resource.url is https', resourceUrl.startsWith('https://'), `resource.url=${resourceUrl}`);
+  }
 
   const accepts = challenge.accepts;
   if (!Array.isArray(accepts) || accepts.length === 0) {
@@ -405,12 +412,14 @@ async function checkCriteriaSchemaCompleteness() {
   const premiumCriteria = criteriaProps(premiumChallenge);
   const advancedCriteria = criteriaProps(advancedChallenge);
 
+  // time_bound is no longer offered (round 10): the Clawstr collector cannot
+  // attribute evidence to milestones, so it could only ever score `failed`.
   const PREMIUM_EXPECTED_FIELDS = [
-    'duration_days', 'frequency', 'minimum_actions', 'action_type', 'content_requirements',
-    'quality_metrics', 'minimum_samples', 'milestones', 'allow_early_completion', 'penalty_per_late_hour'
+    'duration_days', 'frequency', 'minimum_actions', 'content_requirements',
+    'quality_metrics', 'minimum_samples'
   ];
   const ADVANCED_EXPECTED_FIELDS = [
-    'verification_type', 'duration_days', 'frequency', 'minimum_actions', 'action_type',
+    'verification_type', 'duration_days', 'frequency', 'minimum_actions',
     'content_requirements', 'quality_metrics', 'minimum_samples'
   ];
 
@@ -436,19 +445,14 @@ async function checkCriteriaSchemaCompleteness() {
     check('advanced criteria schema documents every field scoring reads', false, 'could not read advanced criteria schema');
   }
 
-  // The example itself must be one that would actually work, not merely one
-  // the schema happens to allow — this is exactly what broke before.
-  const premiumExampleBody = premiumChallenge?.extensions?.bazaar?.info?.input?.body;
-  if (premiumExampleBody?.verification_type === 'time_bound') {
-    const milestones = premiumExampleBody.criteria?.milestones;
-    const valid = Array.isArray(milestones) && milestones.length > 0 &&
-      milestones.every(m => m && typeof m === 'object' && m.milestone_id && m.deadline);
-    check(
-      'premium discovery example (verification_type: time_bound) has a non-empty, well-formed milestones array',
-      valid,
-      valid ? '' : `criteria.milestones=${JSON.stringify(milestones)}`
-    );
-  }
+  // Nothing unscoreable may be advertised: time_bound always scored `failed`.
+  const premiumTypes = premiumChallenge?.extensions?.bazaar?.schema
+    ?.properties?.input?.properties?.body?.properties?.verification_type?.enum;
+  check(
+    'premium does not advertise time_bound',
+    Array.isArray(premiumTypes) && !premiumTypes.includes('time_bound'),
+    `verification_type enum=${JSON.stringify(premiumTypes)}`
+  );
 }
 
 /**
@@ -549,6 +553,91 @@ async function checkParameterlessProbe() {
   check('premium: GET with a trailing slash returns 402', slash.status === 402, `got ${slash.status}`);
 }
 
+/**
+ * GET with query parameters is a full alias of POST (OKX round 10).
+ *
+ * OKX AI derived this service's call instructions as a GET with query
+ * parameters, and its buyer CLI replays the paid request with GET by default.
+ * The paid GET used to answer 405 — the buyer signed and received nothing,
+ * which is what got the listing delisted. Invalid query parameters must be
+ * rejected before the challenge exactly like an invalid POST body.
+ */
+async function checkGetWithQuery() {
+  console.log('\nGET with query parameters (OKX round-10 regression)');
+
+  const query = new URLSearchParams({
+    agent_id: VALID_PAYLOAD.agent_id,
+    commitment_description: VALID_PAYLOAD.commitment_description,
+    platform: 'clawstr',
+    platform_handle: VALID_PAYLOAD.platform_handle,
+    criteria: JSON.stringify({ duration_days: 7, frequency: 'daily' })
+  });
+  const valid = await probe(`/api/x402/verify/premium?${query}`, { method: 'GET' });
+  check('premium: valid GET query earns the 402 challenge', valid.status === 402, `got ${valid.status}`);
+
+  // The exact values OKX's generated reqExample used.
+  const bad = await probe(
+    '/api/x402/verify/premium?agent_id=13373&commitment_description=test&platform=clawstr&platform_handle=test',
+    { method: 'GET' }
+  );
+  check('premium: GET with platform_handle=test is a 400, not a 402', bad.status === 400, `got ${bad.status}`);
+  check('premium: that 400 carries no PAYMENT-REQUIRED header', !bad.paymentRequired, '');
+
+  const head = await fetch(`${baseUrl}/api/x402/verify/premium`, { method: 'HEAD' });
+  check('premium: HEAD returns 402, not 405', head.status === 402, `got ${head.status}`);
+
+  // The GET example the 402 body advertises must itself be accepted.
+  const exampleGet = valid.body?.example_get;
+  if (exampleGet) {
+    const res = await probe(exampleGet, { method: 'GET' });
+    check('premium: the advertised example_get earns the 402 challenge', res.status === 402, `got ${res.status}`);
+  } else {
+    check('premium: 402 body advertises example_get', false, 'missing');
+  }
+}
+
+/**
+ * Every rejection tells the buyer what to fix and that they were not charged.
+ *
+ * Buyers retried bare messages in production — `Invalid Nostr pubkey "test"`,
+ * and a bech32 error ending `expected "t3jgw3"` that one buyer's LLM read as
+ * an instruction and prepended to the key three times.
+ */
+async function checkErrorGuidance() {
+  console.log('\nerror responses guide the buyer (OKX round-10 regression)');
+
+  const placeholder = await probe('/api/x402/verify/premium', {
+    method: 'POST',
+    body: JSON.stringify({ ...VALID_PAYLOAD, platform_handle: 'test' })
+  });
+  const body = placeholder.body || {};
+  check('placeholder handle: 400 names the field', body.field === 'platform_handle', `field=${body.field}`);
+  check('placeholder handle: 400 gives a valid example', body.example === VALID_PAYLOAD.platform_handle, `example=${body.example}`);
+  check('placeholder handle: 400 says the buyer was not charged', body.charged === false, `charged=${body.charged}`);
+  check(
+    'placeholder handle: 400 shows how to call, both verbs',
+    !!body.how_to_call?.example_request && !!body.how_to_call?.example_get,
+    ''
+  );
+
+  const truncated = await probe('/api/x402/verify/premium', {
+    method: 'POST',
+    body: JSON.stringify({ ...VALID_PAYLOAD, platform_handle: 'npub1xpxr0awey3j9q3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5' })
+  });
+  check(
+    'corrupted npub: 400 never echoes the checksum',
+    truncated.status === 400 && !/checksum|expected "/i.test(truncated.text),
+    truncated.text.slice(0, 120)
+  );
+
+  const missing = await probe('/api/x402/verify/premium', { method: 'POST', body: JSON.stringify({ agent_id: 'x' }) });
+  check(
+    'missing fields: each listed with an example',
+    Array.isArray(missing.body?.missing) && missing.body.missing.every(m => m.field && m.example),
+    JSON.stringify(missing.body?.missing?.map(m => m.field))
+  );
+}
+
 async function main() {
   console.log(`\nOKX preflight check against ${baseUrl}`);
 
@@ -560,6 +649,8 @@ async function main() {
   await checkCriteriaSchemaCompleteness();
   await checkAdvertisedExampleIsAccepted();
   await checkParameterlessProbe();
+  await checkGetWithQuery();
+  await checkErrorGuidance();
 
   const failed = results.filter(r => !r.passed);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

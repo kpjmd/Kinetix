@@ -98,6 +98,7 @@ jest.mock('../utils/erc8004-reputation', () => ({
 }));
 
 const request = require('supertest');
+const clawstrApi = require('../utils/clawstr-api');
 const server = require('../api/x402/server');
 
 // Kinetix's own live Clawstr identity, and the hex it decodes to. The gate
@@ -126,6 +127,25 @@ function readCommitment(commitmentId) {
 describe('x402 verification server', () => {
   beforeAll(async () => {
     await server.initializeServices();
+  });
+
+  // The paid response carries a baseline snapshot read from the Nostr relays.
+  // Never reach them from a test: stub the one query the baseline makes with
+  // a day of recent activity. Individual tests override it.
+  let eventsByAuthor;
+  beforeEach(() => {
+    const now = Math.floor(Date.now() / 1000);
+    eventsByAuthor = jest.spyOn(clawstrApi, 'getEventsByAuthor').mockResolvedValue({
+      events: [
+        { id: 'e1', created_at: now - 3600, content: 'build log day 1' },
+        { id: 'e2', created_at: now - 7200, content: 'build log day 1, part 2' }
+      ],
+      relaysOk: 3,
+      relaysTotal: 3
+    });
+  });
+  afterEach(() => {
+    eventsByAuthor.mockRestore();
   });
 
   afterAll(() => {
@@ -195,7 +215,8 @@ describe('x402 verification server', () => {
       const res = await request(server).post('/api/x402/verify/premium').send(withoutPlatform);
 
       expect(res.status).toBe(400);
-      expect(res.body.details).toMatch(/platform is required/);
+      expect(res.body.details).toMatch(/Missing required field: platform/);
+      expect(res.body.missing[0]).toMatchObject({ field: 'platform', example: 'clawstr' });
     });
 
     it('refuses a platform with no working evidence collector', async () => {
@@ -215,7 +236,8 @@ describe('x402 verification server', () => {
         .send({ ...validPayload, platform_handle: '   ' });
 
       expect(res.status).toBe(400);
-      expect(res.body.details).toMatch(/platform_handle is required/);
+      expect(res.body.details).toMatch(/Missing required field: platform_handle/);
+      expect(res.body.missing[0].example).toBe(KINETIX_NPUB);
     });
 
     it('persists the monitoring target so evidence collection can find the agent', async () => {
@@ -338,16 +360,22 @@ describe('x402 verification server', () => {
       expect(res.headers['payment-required']).toBeUndefined();
     });
 
-    it('accepts a valid time_bound request', async () => {
+    it('refuses even a well-formed time_bound request, which could only ever score failed', async () => {
+      // The Clawstr collector never tags evidence with a milestone_id, so
+      // _scoreTimeBound marks every milestone missed. Selling it takes payment
+      // for a foregone `failed`.
       const res = await request(server)
         .post('/api/x402/verify/premium')
         .send({
           ...validPayload,
           verification_type: 'time_bound',
-          criteria: { milestones: [{ milestone_id: 'm1', deadline: '2026-09-01T00:00:00Z' }] }
+          criteria: { milestones: [{ milestone_id: 'm1', deadline: '2026-12-01T00:00:00Z' }] }
         });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('UNSUPPORTED_VERIFICATION_TYPE');
+      expect(res.body.example).toBe('consistency');
+      expect(res.headers['payment-required']).toBeUndefined();
     });
   });
 
@@ -361,7 +389,26 @@ describe('x402 verification server', () => {
       expect(res.headers['payment-required']).toBeUndefined();
     });
 
-    it('accepts a valid quality request', async () => {
+    it('accepts a quality request judged on post length', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/advanced')
+        .send({
+          ...validPayload,
+          criteria: {
+            verification_type: 'quality',
+            duration_days: 14,
+            quality_metrics: { minimum_length: 10 },
+            minimum_samples: 5
+          }
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.baseline.outlook_reason).toMatch(/10-character minimum/);
+    });
+
+    it('refuses quality metrics no Clawstr evidence carries', async () => {
+      // response_time_minutes is read from a field the collector never sets,
+      // so it would score 0 whatever the agent did.
       const res = await request(server)
         .post('/api/x402/verify/advanced')
         .send({
@@ -374,7 +421,9 @@ describe('x402 verification server', () => {
           }
         });
 
-      expect(res.status).toBe(200);
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('UNSUPPORTED_QUALITY_METRIC');
+      expect(res.body.details).toMatch(/response_time_minutes/);
     });
   });
 
@@ -502,19 +551,20 @@ describe('x402 verification server', () => {
       { tier: 'premium', required: ['agent_id', 'commitment_description', 'platform', 'platform_handle'] }
     ];
 
-    it.each(tiers)('GET /$tier is routed, not a 404', async ({ tier, required }) => {
+    it.each(tiers)('GET /$tier with no parameters is a probe, and a paid one is told how to call', async ({ tier, required }) => {
       const res = await request(server).get(`/api/x402/verify/${tier}`);
 
       // In production the payment middleware answers this with the 402
-      // challenge first; reaching this handler means TEST_MODE (or a paid GET).
-      expect(res.status).not.toBe(404);
-      expect(res.status).toBe(405);
-      expect(res.headers.allow).toBe('POST');
-      expect(res.body.method).toBe('POST');
+      // challenge first; reaching the handler means it arrived paid. It must
+      // be 4xx (unsettled) and say exactly how to repeat it correctly — it
+      // used to be a 405, the dead end OKX's GET-replaying buyers hit.
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('MISSING_PARAMETERS');
+      expect(res.body.charged).toBe(false);
       expect(res.body.required).toEqual(required);
-      // The parameter details a reviewer or buyer agent needs, served inline.
-      expect(res.body.parameters.properties.agent_id).toBeDefined();
-      expect(res.body.example_request.agent_id).toBeTruthy();
+      expect(res.body.how_to_call.method).toBe('POST');
+      expect(res.body.how_to_call.example_request.agent_id).toBeTruthy();
+      expect(res.body.how_to_call.example_get).toMatch(new RegExp(`^/api/x402/verify/${tier}\\?`));
     });
 
     it.each(tiers)('POST /$tier with no body is treated as a probe, not bad input', async ({ tier, required }) => {
@@ -558,9 +608,201 @@ describe('x402 verification server', () => {
         expect(get).toBeDefined();
         // Same object reference, so the GET and POST challenges cannot drift.
         expect(get).toBe(post);
+        expect(protectedRoutes[`HEAD /api/x402/verify/${tier}`]).toBe(post);
         expect(get.accepts.some(a => a.network === 'eip155:196')).toBe(true);
       }
     });
+  });
+
+  // OKX AI delisted this service (2026-09-30): "did not deliver after the
+  // buyer completed payment ... error responses unclear". Each test below
+  // pins one of the concrete failures traced from production logs.
+  describe('delivery on payment (OKX round 10)', () => {
+    const attestationService = require('../services/attestation-service');
+
+    it('delivers a signed certificate, a baseline and next steps, not just an id', async () => {
+      const res = await request(server).post('/api/x402/verify/premium').send(validPayload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.delivered).toEqual(['certificate', 'baseline']);
+      expect(res.body.summary).toMatch(/Monitoring started for agent_test_001/);
+
+      const { certificate } = res.body;
+      expect(certificate.type).toBe('kinetix_commitment_certificate');
+      expect(certificate.commitment_id).toBe(res.body.commitment_id);
+      expect(certificate.pubkey).toBe(KINETIX_HEX);
+      expect(certificate.criteria.minimum_actions).toBe(7);
+      // Checkable by anyone with the published address, the same way as a receipt.
+      expect(attestationService.verifyReceipt(certificate)).toBe(true);
+      expect(attestationService.verifyReceipt({ ...certificate, agent_id: 'someone_else' })).toBe(false);
+
+      expect(res.body.baseline).toMatchObject({ status: 'complete', events_found: 2, active_days: 1 });
+      expect(res.body.next_steps.status_url).toMatch(
+        new RegExp(`^http://127\\.0\\.0\\.1:\\d+/api/x402/verify/${res.body.commitment_id}/status$`)
+      );
+      expect(res.body.final_receipt_expected_by).toBeTruthy();
+
+      // Stored with the commitment, in the same write.
+      expect(readCommitment(res.body.commitment_id).certificate.signatures.kinetix_signature)
+        .toBe(certificate.signatures.kinetix_signature);
+    });
+
+    it('still delivers when the relays are down, with the baseline marked unavailable', async () => {
+      eventsByAuthor.mockRejectedValue(new Error('all relays down'));
+
+      const res = await request(server).post('/api/x402/verify/premium').send(validPayload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.certificate).toBeTruthy();
+      expect(res.body.baseline.status).toBe('unavailable');
+      expect(res.body.baseline.reason).not.toMatch(/all relays down/);
+    });
+
+    it('performs the verification on a paid GET with query parameters (OKX replays with GET)', async () => {
+      const res = await request(server)
+        .get('/api/x402/verify/premium')
+        .query({
+          agent_id: 'agent_get_001',
+          commitment_description: 'Post daily for 7 days',
+          platform: 'clawstr',
+          platform_handle: KINETIX_NPUB,
+          criteria: JSON.stringify({ duration_days: 7, frequency: 'daily' })
+        });
+
+      expect(res.status).toBe(200);
+      const stored = readCommitment(res.body.commitment_id);
+      expect(stored.agent_id).toBe('agent_get_001');
+      expect(stored.criteria).toMatchObject({ duration_days: 7, frequency: 'daily', minimum_actions: 7 });
+    });
+
+    it('accepts criteria as dotted query keys, coercing numbers', async () => {
+      const res = await request(server)
+        .get('/api/x402/verify/premium')
+        .query({
+          agent_id: 'agent_get_002',
+          commitment_description: 'Post weekly',
+          platform: 'clawstr',
+          platform_handle: KINETIX_HEX,
+          'criteria.duration_days': '14',
+          'criteria.frequency': 'weekly'
+        });
+
+      expect(res.status).toBe(200);
+      const stored = readCommitment(res.body.commitment_id);
+      expect(stored.criteria.duration_days).toBe(14);
+      expect(stored.criteria.frequency).toBe('weekly');
+    });
+
+    it('validates GET query parameters before any 402', async () => {
+      const res = await request(server)
+        .get('/api/x402/verify/premium')
+        .query({ agent_id: '13373', commitment_description: 'test', platform: 'clawstr', platform_handle: 'test' });
+
+      expect(res.status).toBe(400);
+      expect(res.headers['payment-required']).toBeUndefined();
+      expect(res.body.field).toBe('platform_handle');
+    });
+
+    it('accepts criteria sent as a JSON string in a POST body (OKX types it as a string)', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, criteria: '{"duration_days":7,"frequency":"daily"}' });
+
+      expect(res.status).toBe(200);
+      expect(readCommitment(res.body.commitment_id).criteria.frequency).toBe('daily');
+    });
+
+    it('explains a corrupted npub without echoing the checksum a buyer once prepended', async () => {
+      // The exact value a buyer sent on 2026-09-30: five characters dropped.
+      const truncated = 'npub1xpxr0awey3j9q3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform_handle: truncated });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'INVALID_PLATFORM_HANDLE',
+        field: 'platform_handle',
+        received: truncated,
+        example: KINETIX_NPUB,
+        charged: false
+      });
+      expect(res.body.error).toMatch(/58 characters long/);
+      expect(res.text).not.toMatch(/checksum|expected "/i);
+    });
+
+    it('names the field and a real example for the placeholder "test"', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ ...validPayload, platform_handle: 'test' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/"test" is not a Nostr public key/);
+      expect(res.body.example).toBe(KINETIX_NPUB);
+      expect(res.body.payment_note).toMatch(/not charged/);
+      expect(res.body.how_to_call.example_request.platform_handle).toBe(KINETIX_NPUB);
+    });
+
+    it('lists every missing field with its type and an example', async () => {
+      const res = await request(server)
+        .post('/api/x402/verify/premium')
+        .send({ agent_id: 'a1' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Missing required fields: commitment_description, platform, platform_handle');
+      expect(res.body.missing.map(m => m.field)).toEqual(['commitment_description', 'platform', 'platform_handle']);
+      for (const m of res.body.missing) {
+        expect(m.type).toBe('string');
+        expect(m.example).toBeTruthy();
+      }
+    });
+
+    it('answers malformed JSON and unknown routes with JSON, not HTML', async () => {
+      const bad = await request(server)
+        .post('/api/x402/verify/premium')
+        .set('Content-Type', 'application/json')
+        .send('{"agent_id": ');
+      expect(bad.status).toBe(400);
+      expect(bad.body.code).toBe('INVALID_JSON');
+
+      const missing = await request(server).get('/api/x402/verify/platinum');
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('NOT_FOUND');
+    });
+
+    it('links the receipt from the status route', async () => {
+      const created = await request(server).post('/api/x402/verify/premium').send(validPayload);
+      const res = await request(server).get(`/api/x402/verify/${created.body.commitment_id}/status`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toHaveProperty('receipt_url', null);
+    });
+
+    it('records the payment as pending settlement, never pre-confirmed', async () => {
+      const created = await request(server).post('/api/x402/verify/premium').send(validPayload);
+      const dir = path.join(TEST_DATA_DIR, 'x402-payments');
+      const record = fs.readdirSync(dir)
+        .map(f => JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')))
+        .find(p => p.commitment_id === created.body.commitment_id);
+
+      expect(record.status).toBe('pending_settlement');
+    });
+
+    it.each(['basic', 'advanced', 'premium'])(
+      'the advertised %s examples succeed verbatim, as POST and as GET',
+      async tier => {
+        const discovery = require('../api/x402/server').protectedRoutes[`POST /api/x402/verify/${tier}`]
+          .extensions.bazaar;
+        const body = discovery.info.input.body;
+
+        const post = await request(server).post(`/api/x402/verify/${tier}`).send(body);
+        expect(post.status).toBe(200);
+
+        const probe = await request(server).post(`/api/x402/verify/${tier}`).send({ agent_id: 'x' });
+        const get = await request(server).get(probe.body.how_to_call.example_get);
+        expect(get.status).toBe(200);
+      }
+    );
   });
 
   describe('premium criteria is optional', () => {
@@ -589,13 +831,13 @@ describe('x402 verification server', () => {
       expect(res.status).toBe(400);
     });
 
-    it('still requires quality/time_bound sub-fields when that type is chosen', async () => {
+    it('still requires quality sub-fields when that type is chosen', async () => {
       const res = await request(server)
         .post('/api/x402/verify/premium')
-        .send({ ...validPayload, verification_type: 'time_bound', criteria: undefined });
+        .send({ ...validPayload, verification_type: 'quality', criteria: undefined });
 
       expect(res.status).toBe(400);
-      expect(res.body.details).toMatch(/milestones/);
+      expect(res.body.field).toBe('criteria.quality_metrics');
     });
   });
 });

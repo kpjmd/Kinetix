@@ -10,6 +10,31 @@ const easService = require('../utils/eas-attestation');
 const moltbookAnnounce = require('../utils/moltbook-announce');
 const { ValidationError } = require('../utils/validation-error');
 
+// What a buyer needs to repair each field this service validates. Attached to
+// the ValidationError so the paid x402 routes can say what was expected and
+// show a working value, rather than only naming the field.
+const FIELD_GUIDANCE = {
+  agent_id: { expected: 'Text: your identifier for the agent being verified', example: 'example-agent-123' },
+  commitment_description: { expected: 'Text: the commitment in plain words', example: 'Post at least once a day for 7 days' },
+  verification_type: { expected: 'One of: consistency, quality', example: 'consistency' },
+  criteria: {
+    expected: 'A JSON object (or a JSON string of one). Omit it for a 7-day daily consistency check.',
+    example: { duration_days: 7, frequency: 'daily' }
+  },
+  'criteria.milestones': {
+    expected: 'A non-empty array of {milestone_id, deadline}',
+    example: [{ milestone_id: 'beta', deadline: '2026-12-01T00:00:00Z' }]
+  },
+  'criteria.quality_metrics': { expected: 'An object with minimum_length (number of characters)', example: { minimum_length: 200 } },
+  'criteria.minimum_samples': { expected: 'A positive integer: posts needed to score quality', example: 5 },
+  'criteria.duration_days': { expected: 'A positive number of days', example: 7 },
+  'criteria.minimum_actions': { expected: 'A positive integer: qualifying posts required in the window', example: 7 }
+};
+
+function field(name, code) {
+  return { code, field: name, ...(FIELD_GUIDANCE[name] || {}) };
+}
+
 // Actions expected per day for each supported frequency.
 const FREQUENCY_RATE_PER_DAY = { hourly: 24, daily: 1, weekly: 1 / 7 };
 
@@ -122,13 +147,44 @@ class VerificationService {
       erc8004_token_id: commitment.erc8004_token_id || null
     };
 
+    // When the final receipt can be expected: the window end plus the
+    // collection grace scoring may wait out (see _collectionReadiness).
+    const graceHours = this.rules.monitoring?.collection_grace_hours ?? 24;
+    const receiptExpectedBy = new Date(
+      new Date(endDate).getTime() + graceHours * 60 * 60 * 1000
+    ).toISOString();
+
+    // Issued inside this save rather than patched on afterwards: saves are
+    // whole-file, and the monitoring loop may load and rewrite this commitment
+    // at any moment once it exists.
+    // Only where a signer is loaded (the x402 service always has one); other
+    // callers of createVerification keep working without a certificate.
+    if (this.attestationService?.signingWallet) {
+      record.certificate = await this.attestationService.issueCertificate({
+        commitment_id: commitmentId,
+        issued_at: now,
+        tier: commitment.payment?.tier || null,
+        agent_id: record.agent_id,
+        commitment_description: record.description,
+        platform_profiles: record.platform_profiles,
+        pubkey: record.pubkey,
+        verification_type: record.verification_type,
+        criteria,
+        window: { start: startDate, end: endDate },
+        final_receipt_expected_by: receiptExpectedBy
+      });
+    }
+
     await dataStore.saveCommitment(record);
     this._log(`Created verification ${commitmentId}`, { difficulty, verification_type: commitment.verification_type });
 
     return {
       verification_id: commitmentId,
       status: 'monitoring',
-      expected_completion: endDate
+      expected_completion: endDate,
+      final_receipt_expected_by: receiptExpectedBy,
+      criteria,
+      certificate: record.certificate || null
     };
   }
 
@@ -993,15 +1049,26 @@ class VerificationService {
   }
 
   _validateCommitment(commitment) {
-    if (!commitment.agent_id) throw new ValidationError('agent_id is required');
-    if (!commitment.description) throw new ValidationError('description is required');
-    if (!commitment.verification_type) throw new ValidationError('verification_type is required');
-    if (!['consistency', 'quality', 'time_bound'].includes(commitment.verification_type)) {
-      throw new ValidationError(`Invalid verification_type: ${commitment.verification_type}`);
+    if (!commitment.agent_id) {
+      throw new ValidationError('agent_id is required', field('agent_id', 'MISSING_FIELD'));
     }
-    if (!commitment.criteria) throw new ValidationError('criteria is required');
+    if (!commitment.description) {
+      throw new ValidationError('description is required', field('commitment_description', 'MISSING_FIELD'));
+    }
+    if (!commitment.verification_type) {
+      throw new ValidationError('verification_type is required', field('verification_type', 'MISSING_FIELD'));
+    }
+    if (!['consistency', 'quality', 'time_bound'].includes(commitment.verification_type)) {
+      throw new ValidationError(`Invalid verification_type: ${commitment.verification_type}`, {
+        ...field('verification_type', 'INVALID_VALUE'),
+        received: commitment.verification_type
+      });
+    }
+    if (!commitment.criteria) {
+      throw new ValidationError('criteria is required', field('criteria', 'MISSING_FIELD'));
+    }
     if (typeof commitment.criteria !== 'object' || Array.isArray(commitment.criteria)) {
-      throw new ValidationError('criteria must be an object');
+      throw new ValidationError('criteria must be an object', field('criteria', 'INVALID_TYPE'));
     }
     // _scoreTimeBound does `criteria.milestones.forEach(...)` with no guard —
     // an absent or empty array must be caught here, before payment, not
@@ -1009,7 +1076,10 @@ class VerificationService {
     if (commitment.verification_type === 'time_bound') {
       const milestones = commitment.criteria.milestones;
       if (!Array.isArray(milestones) || milestones.length === 0) {
-        throw new ValidationError('criteria.milestones is required and must be a non-empty array for verification_type "time_bound"');
+        throw new ValidationError(
+          'criteria.milestones is required and must be a non-empty array for verification_type "time_bound"',
+          field('criteria.milestones', 'MISSING_FIELD')
+        );
       }
       milestones.forEach((m, i) => {
         if (!m || typeof m !== 'object') {
@@ -1027,14 +1097,23 @@ class VerificationService {
     // directly, unguarded — same reasoning as time_bound above.
     if (commitment.verification_type === 'quality') {
       if (!commitment.criteria.quality_metrics || typeof commitment.criteria.quality_metrics !== 'object') {
-        throw new ValidationError('criteria.quality_metrics is required and must be an object for verification_type "quality"');
+        throw new ValidationError(
+          'criteria.quality_metrics is required and must be an object for verification_type "quality"',
+          field('criteria.quality_metrics', 'MISSING_FIELD')
+        );
       }
       if (commitment.criteria.minimum_samples === undefined) {
-        throw new ValidationError('criteria.minimum_samples is required for verification_type "quality"');
+        throw new ValidationError(
+          'criteria.minimum_samples is required for verification_type "quality"',
+          field('criteria.minimum_samples', 'MISSING_FIELD')
+        );
       }
       const samples = Number(commitment.criteria.minimum_samples);
       if (!Number.isInteger(samples) || samples <= 0) {
-        throw new ValidationError('criteria.minimum_samples must be a positive integer');
+        throw new ValidationError('criteria.minimum_samples must be a positive integer', {
+          ...field('criteria.minimum_samples', 'INVALID_VALUE'),
+          received: commitment.criteria.minimum_samples
+        });
       }
     }
     // Guarded here rather than at the callers: a non-numeric duration reaches
@@ -1043,7 +1122,10 @@ class VerificationService {
     if (commitment.criteria.duration_days !== undefined) {
       const days = Number(commitment.criteria.duration_days);
       if (!Number.isFinite(days) || days <= 0) {
-        throw new ValidationError('criteria.duration_days must be a positive number');
+        throw new ValidationError('criteria.duration_days must be a positive number', {
+          ...field('criteria.duration_days', 'INVALID_VALUE'),
+          received: commitment.criteria.duration_days
+        });
       }
     }
     // minimum_actions is the completion-rate denominator, and the paid routes
@@ -1052,7 +1134,10 @@ class VerificationService {
     if (commitment.criteria.minimum_actions !== undefined) {
       const actions = Number(commitment.criteria.minimum_actions);
       if (!Number.isInteger(actions) || actions <= 0) {
-        throw new ValidationError('criteria.minimum_actions must be a positive integer');
+        throw new ValidationError('criteria.minimum_actions must be a positive integer', {
+          ...field('criteria.minimum_actions', 'INVALID_VALUE'),
+          received: commitment.criteria.minimum_actions
+        });
       }
     }
   }

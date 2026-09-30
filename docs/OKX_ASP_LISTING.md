@@ -147,8 +147,8 @@ with a 400.
 
 All request validation — the required-field checks above, platform/handle
 resolution, and the commitment shape/range checks (`verification_type`,
-`duration_days`, `minimum_actions`) — runs in an `app.post` handler mounted
-*before* the x402 payment middleware, on every paid route. A request that
+`duration_days`, `minimum_actions`) — runs in `app.post` and `app.get`
+handlers mounted *before* the x402 payment middleware, on every paid route. A request that
 fails any of these checks gets a 400 immediately and never reaches the point
 where a 402 payment challenge is issued, so an agent is never asked to sign a
 payment authorization for a request that was going to be rejected. Only a
@@ -157,9 +157,43 @@ then behaves as usual (`@x402/express` skips settlement whenever the handler
 responds `>= 400`, so a failure after payment is still never charged).
 
 On premium, `criteria` is **optional** — omit it for a 7-day daily consistency
-check. Choosing `verification_type: "quality"` or `"time_bound"` does make that
-type's sub-fields required (`quality_metrics` + `minimum_samples`, or
-`milestones`), and those are enforced pre-payment too.
+check. Choosing `verification_type: "quality"` makes `quality_metrics.minimum_length`
+and `minimum_samples` required, enforced pre-payment too.
+
+Only verifications the Clawstr collector can actually score are sold. The
+collector records each post's time and length and nothing else, so
+`time_bound` (scored by matching evidence to `milestone_id`, which no evidence
+carries) and the other quality metrics (`response_time_minutes`,
+`required_format`, `satisfaction_threshold`, `technical_accuracy`) could only
+ever produce `failed`. They are rejected with a 400 before payment.
+
+## What a paid call delivers (OKX round 10)
+
+OKX AI delisted the service on 2026-09-30: "did not deliver after the buyer
+completed payment". A paid call used to return only
+`{commitment_id, status: "monitoring"}`, with the receipt arriving when the
+window closed (up to 30 days later) at a URL the response never mentioned.
+OKX expects the paid call itself to deliver. It now returns, synchronously:
+
+- `certificate`: the terms bought (agent, pubkey, criteria, window), signed
+  at purchase with the same key and EIP-191 scheme as receipts, so
+  `verifyReceipt()` checks it unchanged;
+- `baseline`: the agent's activity over the 7 days *before* purchase, with an
+  `on_track` / `at_risk` / `no_recent_activity` read. Context only, never
+  scored, since Nostr `created_at` is author-controlled. Capped at 8s and
+  never fails the call; a relay outage marks it `unavailable`;
+- `next_steps`: absolute `status_url` and `receipt_url_template`, and
+  `final_receipt_expected_by`.
+
+Every 400 carries `field`, `received`, `expected`, `example`, `charged: false`
+and `how_to_call` (a POST body and a GET query string that both work). A
+corrupted npub is described by its length, never with the bech32 library's
+`expected "<checksum>"` text, which a buyer's LLM once prepended to the key.
+
+Settlement is recorded after the fact: each payment record starts
+`pending_settlement` and becomes `settled` (with tx hash, network, payer) or
+`settlement_failed` once `@x402/express` has settled, logged as
+`[x402] Delivered … and settled: tx …`.
 
 ## Discovery: a parameterless probe must return the challenge
 
@@ -193,9 +227,15 @@ Two invariants hold this together, both covered by `npm run okx:preflight`:
   advertise "GET with a JSON body" and a facilitator could index a second
   discovery row keyed `{same url, method: GET}`.
 
-A GET that somehow arrives paid gets a **405** (`Allow: POST`) with the same
-parameter description, never a 200 — a 2xx there would settle the payment and
-charge for a document.
+**GET is a full alias of POST**, with the same parameter names in the query
+string (`criteria` as a JSON string, or dotted keys like
+`criteria.duration_days=7`). OKX AI derives its own call instructions for a
+listed service, and for this one it generated `method: GET` with query
+parameters; its buyer CLI also replays the paid request with GET by default.
+A paid GET used to get a **405** — the buyer signed and received nothing,
+which is the delisting above. Now query parameters are validated before the
+402 like a body is, and a paid GET performs the verification. A paid GET with
+no parameters still gets a 4xx (never settled) that says how to call.
 
 The 402 body itself (`unpaidResponseBody` per tier) carries `required`, the
 full parameter schema and a worked example, so a human reading the endpoint
@@ -206,60 +246,44 @@ unaffected.
 ```json
 {
   "agent_id": "example-agent-123",
-  "commitment_description": "Post a daily build log for 30 days",
+  "commitment_description": "Post at least once a day for 7 days",
   "verification_type": "consistency",
   "platform": "clawstr",
   "platform_handle": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
-  "criteria": { "duration_days": 30, "frequency": "daily", "minimum_actions": 30 }
+  "criteria": { "duration_days": 7, "frequency": "daily" }
 }
 ```
 
+The same request as a GET:
+
+```
+/api/x402/verify/premium?agent_id=example-agent-123&commitment_description=Post+at+least+once+a+day+for+7+days&platform=clawstr&platform_handle=npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5&criteria=%7B%22duration_days%22%3A7%2C%22frequency%22%3A%22daily%22%7D
+```
+
 `minimum_actions` is optional; when omitted it is derived from `duration_days`
-and `frequency`, so a 30-day daily commitment targets 30 actions.
+and `frequency`, so a 7-day daily commitment targets 7 actions.
 
 `criteria`'s shape depends on `verification_type` — the example above is the
-`consistency` shape. The other two:
+`consistency` shape. The other:
 
 ```json
 {
   "agent_id": "example-agent-123",
-  "commitment_description": "Respond to prompts within 30 minutes for two weeks",
+  "commitment_description": "Write substantive posts for two weeks",
   "verification_type": "quality",
   "platform": "clawstr",
   "platform_handle": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
   "criteria": {
     "duration_days": 14,
-    "quality_metrics": { "response_time_minutes": 30, "minimum_length": 100 },
+    "quality_metrics": { "minimum_length": 200 },
     "minimum_samples": 5
   }
 }
 ```
 
-```json
-{
-  "agent_id": "example-agent-123",
-  "commitment_description": "Ship v2 API by three milestone deadlines",
-  "verification_type": "time_bound",
-  "platform": "clawstr",
-  "platform_handle": "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
-  "criteria": {
-    "milestones": [
-      { "milestone_id": "design_spec", "description": "Design spec published", "deadline": "2026-09-01T00:00:00Z", "grace_period_hours": 12 },
-      { "milestone_id": "beta_deploy", "description": "Beta deployed", "deadline": "2026-09-15T00:00:00Z", "grace_period_hours": 12 }
-    ],
-    "allow_early_completion": true,
-    "penalty_per_late_hour": 1
-  }
-}
-```
-
-`quality` requires `quality_metrics` (an object — at least one of
-`response_time_minutes`, `minimum_length`, `required_format`,
-`satisfaction_threshold`, `technical_accuracy`) and `minimum_samples`.
-`time_bound` requires a non-empty `milestones` array, each item needing at
-least `milestone_id` and `deadline` (ISO 8601). Both are validated before the
-payment challenge is issued, same as every other required field — see
-`GET /api/v1/manifest` for the complete machine-readable schema per type.
+`quality` requires `quality_metrics.minimum_length` (characters, the only
+metric Clawstr evidence can judge) and `minimum_samples`. Both are validated
+before the payment challenge is issued, same as every other required field.
 
 `erc8004_token_id` is optional. Supplying it is what enables the on-chain
 ERC-8004 reputation submission; without it that step is skipped.

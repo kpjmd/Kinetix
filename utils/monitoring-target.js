@@ -28,6 +28,44 @@ const { normalizeNostrPubkey } = require('./clawstr-api');
 // through to "not yet implemented" and collects nothing.
 const SUPPORTED_PLATFORMS = ['clawstr'];
 
+// A known-valid handle to offer in error guidance: Kinetix's own Clawstr
+// identity, which posts on a heartbeat and so also gives a buyer testing the
+// service a non-empty baseline. Kept here, beside the only parser it must
+// satisfy, so an example that stops decoding fails this module's tests.
+const EXAMPLE_CLAWSTR_HANDLE = 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
+
+const HANDLE_EXPECTED =
+  'The agent\'s Nostr public key: an npub (starts with "npub1", exactly 63 characters) ' +
+  'or the same key as 64 hexadecimal characters';
+
+/**
+ * Guidance for a platform_handle that did not decode, keyed by the error code
+ * clawstr-api attaches. Deliberately never includes the decoder's own message:
+ * for a corrupted npub that message ends `expected "<checksum>"`, which buyer
+ * agents have read as an instruction and prepended to the key.
+ */
+function handleGuidance(code, handle) {
+  const received = handle.length > 80 ? `${handle.slice(0, 80)}…` : handle;
+  const base = { field: 'platform_handle', received, expected: HANDLE_EXPECTED, example: EXAMPLE_CLAWSTR_HANDLE };
+
+  if (code === 'PUBKEY_CORRUPTED') {
+    return {
+      message:
+        `platform_handle looks like an npub but is corrupted: it is ${handle.length} characters long ` +
+        '(a valid npub is exactly 63) or a character was mistyped. Copy the key exactly from the ' +
+        "agent's profile, or send the 64-character hex form instead. Do not edit characters to repair it.",
+      guidance: { ...base, code: 'INVALID_PLATFORM_HANDLE' }
+    };
+  }
+
+  return {
+    message:
+      `platform_handle "${received}" is not a Nostr public key. Send the agent's npub ` +
+      '(starts with "npub1", 63 characters) or its 64-character hex pubkey.',
+    guidance: { ...base, code: 'INVALID_PLATFORM_HANDLE' }
+  };
+}
+
 /**
  * @param {Object} input
  * @param {string} input.platform - one of SUPPORTED_PLATFORMS
@@ -36,18 +74,31 @@ const SUPPORTED_PLATFORMS = ['clawstr'];
  * @throws {ValidationError} when the commitment could not be monitored
  */
 function resolveMonitoringTarget({ platform, platform_handle }) {
+  const platformGuidance = {
+    field: 'platform',
+    expected: `One of: ${SUPPORTED_PLATFORMS.join(', ')}`,
+    example: SUPPORTED_PLATFORMS[0]
+  };
+
   if (!platform) {
     throw new ValidationError(
-      `platform is required and must be one of: ${SUPPORTED_PLATFORMS.join(', ')}`
+      `platform is required and must be one of: ${SUPPORTED_PLATFORMS.join(', ')}`,
+      { ...platformGuidance, code: 'MISSING_FIELD' }
     );
   }
   if (typeof platform !== 'string' || !SUPPORTED_PLATFORMS.includes(platform)) {
     throw new ValidationError(
-      `Unsupported platform "${platform}". Verification is available for: ${SUPPORTED_PLATFORMS.join(', ')}`
+      `Unsupported platform "${platform}". Verification is available for: ${SUPPORTED_PLATFORMS.join(', ')}`,
+      { ...platformGuidance, code: 'UNSUPPORTED_PLATFORM', received: platform }
     );
   }
   if (!platform_handle || typeof platform_handle !== 'string' || !platform_handle.trim()) {
-    throw new ValidationError(`platform_handle is required for ${platform}`);
+    throw new ValidationError(`platform_handle is required for ${platform}`, {
+      code: 'MISSING_FIELD',
+      field: 'platform_handle',
+      expected: HANDLE_EXPECTED,
+      example: EXAMPLE_CLAWSTR_HANDLE
+    });
   }
 
   const handle = platform_handle.trim();
@@ -62,7 +113,8 @@ function resolveMonitoringTarget({ platform, platform_handle }) {
     try {
       pubkey = normalizeNostrPubkey(handle);
     } catch (error) {
-      throw new ValidationError(`Invalid clawstr platform_handle: ${error.message}`);
+      const { message, guidance } = handleGuidance(error.code, handle);
+      throw new ValidationError(`Invalid clawstr platform_handle: ${message}`, guidance);
     }
   }
 
@@ -74,4 +126,4 @@ function resolveMonitoringTarget({ platform, platform_handle }) {
   };
 }
 
-module.exports = { resolveMonitoringTarget, SUPPORTED_PLATFORMS };
+module.exports = { resolveMonitoringTarget, SUPPORTED_PLATFORMS, EXAMPLE_CLAWSTR_HANDLE };

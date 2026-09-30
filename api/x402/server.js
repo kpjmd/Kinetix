@@ -17,11 +17,24 @@ const verificationRules = require('../../config/verification-rules.json');
 const dataStore = require('../../services/data-store');
 const pricingConfig = require('../../config/x402-pricing.json');
 const { createRateLimiter } = require('../../utils/rate-limiter');
-const { resolveMonitoringTarget, SUPPORTED_PLATFORMS } = require('../../utils/monitoring-target');
+const {
+  resolveMonitoringTarget,
+  SUPPORTED_PLATFORMS,
+  EXAMPLE_CLAWSTR_HANDLE
+} = require('../../utils/monitoring-target');
+const { buildBaseline } = require('../../services/baseline-service');
 const { ValidationError } = require('../../utils/validation-error');
 const clawstrApi = require('../../utils/clawstr-api');
 
 const app = express();
+
+// Railway terminates TLS and forwards over http, so without this req.protocol
+// is 'http' and req.ip is the proxy. The first put `http://` into the 402
+// challenge's resource.url — a client that follows it is 301-redirected, which
+// turns a paid POST into a body-less GET. The second made the rate limiter one
+// bucket shared by every caller.
+app.set('trust proxy', 1);
+
 const KINETIX_WALLET = process.env.CDP_WALLET_ADDRESS || '0x8c61756f693A321777562433E19B2AabF71f5519';
 
 // Normalize network ID format (accept both base-sepolia and base_sepolia)
@@ -88,8 +101,10 @@ function buildAccepts(priceUsdc, payTo) {
   return accepts;
 }
 
-// Parse JSON bodies
+// Parse JSON bodies, and form bodies from clients that send params that way:
+// a non-JSON body used to parse to {} and be treated as a parameterless probe.
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 // Cap how long any single request may occupy a connection. Without this a
 // stalled upstream (IPFS pin, RPC call during scoring) leaves the caller
@@ -97,6 +112,12 @@ app.use(express.json());
 // rather than a failure.
 const REQUEST_TIMEOUT_MS = 30000;
 app.use((req, res, next) => {
+  // Never for a request carrying a payment. @x402/express buffers the
+  // handler's response until settlement finishes, so headersSent stays false
+  // throughout — this timer would replace a delivered result with a 504 while
+  // settlement still charged the buyer. Paid-request latency is bounded
+  // instead by the facilitator verify timeout and the baseline cap.
+  if (hasPaymentHeader(req)) return next();
   const timer = setTimeout(() => {
     if (!res.headersSent) {
       res.status(504).json({ error: 'Request timeout' });
@@ -154,19 +175,57 @@ app.get('/api/x402/verify/:id/status', async (req, res, next) => {
     if (!status) {
       return res.status(404).json({ error: 'Verification not found' });
     }
-    res.json(status);
+    // The absolute link a buyer follows next, so the receipt they paid for is
+    // one hop away rather than a URL pattern they have to know.
+    const receiptUrl = status.receipt_id
+      ? `${publicBaseUrl(req)}/api/v1/attestation/${status.receipt_id}`
+      : null;
+    res.json({ ...status, receipt_url: receiptUrl });
   } catch (error) {
     next(error);
   }
 });
+
+function hasPaymentHeader(req) {
+  return Boolean(req.get('payment-signature') || req.get('x-payment'));
+}
+
+// Neither facilitator client puts a timeout on its fetches. Bound `verify`,
+// which moves no money, so a stalled facilitator fails the request cleanly
+// instead of hanging it. `settle` is deliberately left unbounded: abandoning a
+// settlement that then lands on-chain would charge the buyer for a response
+// we had already turned into an error.
+const FACILITATOR_VERIFY_TIMEOUT_MS = 10000;
+function withVerifyTimeout(client) {
+  return new Proxy(client, {
+    get(target, prop) {
+      const value = target[prop];
+      if (prop === 'verify') {
+        return (...args) => {
+          let timer;
+          return Promise.race([
+            value.apply(target, args),
+            new Promise((_, reject) => {
+              timer = setTimeout(
+                () => reject(new Error(`Facilitator verify timed out after ${FACILITATOR_VERIFY_TIMEOUT_MS}ms`)),
+                FACILITATOR_VERIFY_TIMEOUT_MS
+              );
+            })
+          ]).finally(() => clearTimeout(timer));
+        };
+      }
+      return typeof value === 'function' ? value.bind(target) : value;
+    }
+  });
+}
 
 // Initialize x402 resource server. facilitatorClients is an array so the
 // OKX facilitator (X Layer settlement) can sit alongside the CDP facilitator
 // (Base settlement) on the same resourceServer — x402ResourceServer dispatches
 // each accepts[] entry to whichever registered facilitator supports its network.
 const facilitatorClient = new HTTPFacilitatorClient(facilitatorConfig);
-const facilitatorClients = [facilitatorClient];
-if (okxFacilitatorClient) facilitatorClients.push(okxFacilitatorClient);
+const facilitatorClients = [withVerifyTimeout(facilitatorClient)];
+if (okxFacilitatorClient) facilitatorClients.push(withVerifyTimeout(okxFacilitatorClient));
 const resourceServer = new x402ResourceServer(facilitatorClients);
 
 // Register EVM scheme for each supported network. (The previous call passed
@@ -199,297 +258,200 @@ resourceServer.registerExtension({
     )
 });
 
-// Bazaar discovery metadata
+// Bazaar discovery metadata.
+//
+// Every example here must succeed if a buyer sends it verbatim — buyer agents
+// copy them, and OKX AI derives its own call instructions from them. Past
+// examples 400'd (moltbook), crashed at scoring (time_bound without
+// milestones), and finally could only ever score `failed` (time_bound, which
+// the Clawstr collector cannot attribute). Only what can actually be scored is
+// offered: consistency, and quality judged on post length.
+
+const PLATFORM_HANDLE_DOC =
+  'The agent\'s Nostr public key: an npub (starts with "npub1", exactly 63 characters) or the same ' +
+  'key as 64 hex characters. Copy it exactly; a single changed character fails validation.';
+
+const WALLET_ADDRESS_DOC =
+  'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.';
+
+const CONSISTENCY_CRITERIA_PROPERTIES = {
+  duration_days: {
+    type: 'number',
+    minimum: 1,
+    description: 'Length of the monitoring window in days. Default 7. Capped per tier.'
+  },
+  frequency: {
+    type: 'string',
+    enum: ['daily', 'weekly'],
+    description: "How often the agent is expected to post. Default 'daily'."
+  },
+  minimum_actions: {
+    type: 'number',
+    description: 'Optional. Qualifying posts required in the window. Derived from duration_days and frequency if omitted (7 daily days -> 7).'
+  },
+  content_requirements: {
+    type: 'object',
+    description: 'Optional, consistency only.',
+    properties: {
+      min_length: { type: 'number', description: 'Minimum character length of each qualifying post.' },
+      required_tags: { type: 'array', items: { type: 'string' }, description: 'Tags every qualifying post must include.' },
+      forbidden_content: { type: 'array', items: { type: 'string' }, description: 'Strings that disqualify a post if present.' }
+    }
+  }
+};
+
+const QUALITY_CRITERIA_PROPERTIES = {
+  quality_metrics: {
+    type: 'object',
+    description: 'Required when verification_type is "quality". Posts are judged on length.',
+    properties: {
+      minimum_length: { type: 'number', description: 'Minimum characters for a post to count as a quality sample.' }
+    },
+    required: ['minimum_length']
+  },
+  minimum_samples: {
+    type: 'number',
+    description: 'Required when verification_type is "quality". Posts needed to score; fewer yields "failed".'
+  }
+};
+
+// What a successful paid call returns, abbreviated. Mirrors
+// buildDeliveryResponse below.
+function outputExample(tier) {
+  return {
+    success: true,
+    delivered: ['certificate', 'baseline'],
+    summary: 'Monitoring started for example-agent-123 (7-day daily consistency, 7 posts required). Recent activity (on track): Posted on 6 of the last 7 days; a daily commitment needs activity on nearly every day. Final signed receipt expected by 2026-10-08T12:00:00Z.',
+    commitment_id: 'cmt_kx_abc123',
+    tier,
+    status: 'monitoring',
+    monitoring_until: '2026-10-07T12:00:00Z',
+    final_receipt_expected_by: '2026-10-08T12:00:00Z',
+    certificate: { type: 'kinetix_commitment_certificate', commitment_id: 'cmt_kx_abc123', signatures: { kinetix_signature: '0x…' } },
+    baseline: { status: 'complete', lookback_days: 7, events_found: 12, active_days: 6, outlook: 'on_track' },
+    next_steps: {
+      status_url: 'https://kinetix-x402-production.up.railway.app/api/x402/verify/cmt_kx_abc123/status',
+      receipt_url_template: 'https://kinetix-x402-production.up.railway.app/api/v1/attestation/{receipt_id}'
+    },
+    payment_confirmed: true
+  };
+}
+
 const basicDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
-    agent_id: "example-agent-123",
-    platform: "clawstr",
-    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
-    commitment_description: "Daily consistency check for 7 days"
+    agent_id: 'example-agent-123',
+    platform: 'clawstr',
+    platform_handle: EXAMPLE_CLAWSTR_HANDLE,
+    commitment_description: 'Post at least once a day for 7 days'
   },
   inputSchema: {
     type: 'object',
     properties: {
-      agent_id: { type: 'string', description: 'Unique identifier for the agent' },
+      agent_id: { type: 'string', description: 'Your identifier for the agent being verified.' },
       platform: {
         type: 'string',
         enum: SUPPORTED_PLATFORMS,
         description: 'Platform whose activity is monitored for evidence'
       },
-      platform_handle: {
-        type: 'string',
-        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
-      },
-      wallet_address: {
-        type: 'string',
-        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
-      },
-      commitment_description: { type: 'string', description: 'What is being verified' }
+      platform_handle: { type: 'string', description: PLATFORM_HANDLE_DOC },
+      wallet_address: { type: 'string', description: WALLET_ADDRESS_DOC },
+      commitment_description: { type: 'string', description: 'What is being verified, in plain words.' }
     },
     required: ['agent_id', 'platform', 'platform_handle']
   },
-  output: {
-    example: {
-      success: true,
-      commitment_id: 'cmt_kx_abc123',
-      status: 'monitoring',
-      monitoring_until: '2026-02-22T12:00:00Z',
-      tier: 'basic',
-      payment_confirmed: true
-    }
-  }
+  output: { example: outputExample('basic') }
 });
 
 const advancedDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
-    agent_id: "example-agent-123",
-    commitment_description: "Quality and consistency verification",
-    platform: "clawstr",
-    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
+    agent_id: 'example-agent-123',
+    commitment_description: 'Post at least once a day for 14 days',
+    platform: 'clawstr',
+    platform_handle: EXAMPLE_CLAWSTR_HANDLE,
     criteria: {
-      verification_type: "consistency",
+      verification_type: 'consistency',
       duration_days: 14,
-      frequency: "daily"
+      frequency: 'daily'
     }
   },
   inputSchema: {
     type: 'object',
     properties: {
-      agent_id: { type: 'string', description: 'Unique identifier' },
-      commitment_description: { type: 'string', description: 'What is being verified' },
+      agent_id: { type: 'string', description: 'Your identifier for the agent being verified.' },
+      commitment_description: { type: 'string', description: 'What is being verified, in plain words.' },
       platform: {
         type: 'string',
         enum: SUPPORTED_PLATFORMS,
         description: 'Platform whose activity is monitored for evidence'
       },
-      platform_handle: {
-        type: 'string',
-        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
-      },
-      wallet_address: {
-        type: 'string',
-        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
-      },
+      platform_handle: { type: 'string', description: PLATFORM_HANDLE_DOC },
+      wallet_address: { type: 'string', description: WALLET_ADDRESS_DOC },
       criteria: {
         type: 'object',
         description:
-          "Shape depends on verification_type. 'consistency' uses frequency/duration_days/minimum_actions/" +
-          "action_type/content_requirements. 'quality' uses duration_days/quality_metrics/minimum_samples. " +
-          'Advanced supports consistency and quality only — use the premium tier for time_bound.',
+          'A JSON object (a JSON string of one is also accepted). verification_type "consistency" uses ' +
+          'duration_days/frequency/minimum_actions/content_requirements; "quality" uses duration_days plus ' +
+          'quality_metrics.minimum_length and minimum_samples.',
         properties: {
           verification_type: {
             type: 'string',
             enum: ['consistency', 'quality'],
-            description: 'Which scoring model to apply. Determines which of the fields below are required.'
+            description: "Which scoring model to apply. Default 'consistency'."
           },
-          duration_days: {
-            type: 'number',
-            minimum: 1,
-            maximum: 30,
-            description: 'Length of the monitoring window in days. Used by both consistency and quality.'
-          },
-          frequency: {
-            type: 'string',
-            enum: ['daily', 'weekly'],
-            description: "consistency only. How often the agent is expected to act. Defaults to 'daily' if omitted."
-          },
-          minimum_actions: {
-            type: 'number',
-            description:
-              'consistency only, optional. Number of qualifying actions required in the window. If omitted, ' +
-              'derived from duration_days and frequency (e.g. 14 daily days -> 14).'
-          },
-          action_type: {
-            type: 'string',
-            description: "consistency/quality, optional. Type of action counted as evidence. Defaults to 'post'."
-          },
-          content_requirements: {
-            type: 'object',
-            description: 'consistency only, optional.',
-            properties: {
-              min_length: { type: 'number', description: 'Minimum character length of each qualifying post.' },
-              required_tags: { type: 'array', items: { type: 'string' }, description: 'Tags every qualifying post must include.' },
-              forbidden_content: { type: 'array', items: { type: 'string' }, description: 'Strings that disqualify a post if present.' }
-            }
-          },
-          quality_metrics: {
-            type: 'object',
-            description: 'Required when verification_type is "quality". At least one sub-field should be set.',
-            properties: {
-              response_time_minutes: { type: 'number', description: 'Max minutes from prompt to response to count as on-time.' },
-              minimum_length: { type: 'number', description: 'Minimum response length, in characters.' },
-              required_format: { type: 'string', description: 'Exact format each response must match, e.g. "markdown".' },
-              satisfaction_threshold: { type: 'number', description: 'Minimum average satisfaction rating (1-5) evidence must report.' },
-              technical_accuracy: { type: 'boolean', description: 'Whether each response must be flagged accuracy_verified in evidence.' }
-            }
-          },
-          minimum_samples: {
-            type: 'number',
-            description:
-              'Required when verification_type is "quality". Minimum number of evidence samples needed to score; ' +
-              'fewer samples than this yields status "failed".'
-          }
+          ...CONSISTENCY_CRITERIA_PROPERTIES,
+          ...QUALITY_CRITERIA_PROPERTIES
         },
-        required: ['verification_type', 'duration_days']
+        required: ['duration_days']
       }
     },
     required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
   },
-  output: {
-    example: {
-      success: true,
-      commitment_id: 'cmt_kx_def456',
-      status: 'monitoring',
-      tier: 'advanced',
-      payment_confirmed: true
-    }
-  }
+  output: { example: outputExample('advanced') }
 });
 
 const premiumDiscovery = declareDiscoveryExtension({
   bodyType: 'json',
   input: {
-    agent_id: "example-agent-123",
-    commitment_description: "Ship v2 API by three milestone deadlines",
-    platform: "clawstr",
-    platform_handle: "npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5",
-    verification_type: "time_bound",
-    criteria: {
-      milestones: [
-        {
-          milestone_id: "design_spec",
-          description: "Design spec published",
-          deadline: "2026-09-01T00:00:00Z",
-          grace_period_hours: 12
-        },
-        {
-          milestone_id: "beta_deploy",
-          description: "Beta deployed",
-          deadline: "2026-09-15T00:00:00Z",
-          grace_period_hours: 12
-        }
-      ],
-      allow_early_completion: true,
-      penalty_per_late_hour: 1
-    }
+    agent_id: 'example-agent-123',
+    commitment_description: 'Post at least once a day for 7 days',
+    platform: 'clawstr',
+    platform_handle: EXAMPLE_CLAWSTR_HANDLE,
+    verification_type: 'consistency',
+    criteria: { duration_days: 7, frequency: 'daily' }
   },
   inputSchema: {
     type: 'object',
     properties: {
-      agent_id: { type: 'string', description: 'Unique identifier' },
-      commitment_description: { type: 'string', description: 'What is being verified' },
+      agent_id: { type: 'string', description: 'Your identifier for the agent being verified.' },
+      commitment_description: { type: 'string', description: 'What is being verified, in plain words.' },
       platform: {
         type: 'string',
         enum: SUPPORTED_PLATFORMS,
         description: 'Platform whose activity is monitored for evidence'
       },
-      platform_handle: {
-        type: 'string',
-        description: 'Account identifier on that platform. For clawstr, the Nostr pubkey (npub or hex).'
-      },
-      wallet_address: {
-        type: 'string',
-        description: 'Optional EVM address to receive the on-chain EAS attestation. Omit to get a signed receipt without an EAS attestation.'
-      },
+      platform_handle: { type: 'string', description: PLATFORM_HANDLE_DOC },
+      wallet_address: { type: 'string', description: WALLET_ADDRESS_DOC },
       verification_type: {
         type: 'string',
-        enum: ['consistency', 'quality', 'time_bound'],
-        description: 'Premium supports all types'
+        enum: ['consistency', 'quality'],
+        description: "Optional. Default 'consistency'."
       },
       criteria: {
         type: 'object',
         description:
-          'Optional. Omit it for a 7-day daily consistency check. When supplied, its shape depends on the ' +
-          'sibling verification_type field. consistency uses frequency/duration_days/' +
-          'minimum_actions/action_type/content_requirements. quality requires quality_metrics and ' +
-          'minimum_samples. time_bound requires milestones, and also takes allow_early_completion/' +
-          'penalty_per_late_hour (duration_days is not used by time_bound scoring). The quality and ' +
-          'time_bound requirements are enforced before payment, so a missing one is a 400, not a charge.',
-        properties: {
-          duration_days: {
-            type: 'number',
-            minimum: 1,
-            maximum: 90,
-            description: 'Length of the monitoring window in days. Used by consistency and quality; ignored for time_bound.'
-          },
-          frequency: {
-            type: 'string',
-            enum: ['daily', 'weekly'],
-            description: "consistency only. Defaults to 'daily' if omitted."
-          },
-          minimum_actions: {
-            type: 'number',
-            description: 'consistency only, optional. Derived from duration_days/frequency if omitted.'
-          },
-          action_type: {
-            type: 'string',
-            description: "consistency/quality, optional. Type of action counted as evidence. Defaults to 'post'."
-          },
-          content_requirements: {
-            type: 'object',
-            description: 'consistency only, optional.',
-            properties: {
-              min_length: { type: 'number' },
-              required_tags: { type: 'array', items: { type: 'string' } },
-              forbidden_content: { type: 'array', items: { type: 'string' } }
-            }
-          },
-          quality_metrics: {
-            type: 'object',
-            description: 'Required when verification_type is "quality".',
-            properties: {
-              response_time_minutes: { type: 'number' },
-              minimum_length: { type: 'number' },
-              required_format: { type: 'string' },
-              satisfaction_threshold: { type: 'number' },
-              technical_accuracy: { type: 'boolean' }
-            }
-          },
-          minimum_samples: {
-            type: 'number',
-            description: 'Required when verification_type is "quality".'
-          },
-          milestones: {
-            type: 'array',
-            description: 'Required when verification_type is "time_bound". Non-empty; each item is one deliverable deadline.',
-            items: {
-              type: 'object',
-              properties: {
-                milestone_id: { type: 'string', description: 'Caller-chosen identifier matching this milestone to evidence.' },
-                description: { type: 'string' },
-                deadline: { type: 'string', format: 'date-time', description: 'ISO 8601 timestamp, e.g. "2026-09-01T00:00:00Z".' },
-                required_deliverable: { type: 'string' },
-                grace_period_hours: { type: 'number', description: 'Hours past deadline before lateness penalties start. Default 0.' }
-              },
-              required: ['milestone_id', 'deadline']
-            }
-          },
-          allow_early_completion: {
-            type: 'boolean',
-            description: 'time_bound only, optional. Whether early delivery earns a score bonus. Default true.'
-          },
-          penalty_per_late_hour: {
-            type: 'number',
-            description: 'time_bound only, optional. Score points deducted per hour late, past the grace period. Default 1.'
-          }
-        },
+          'Optional. Omit it for a 7-day daily consistency check. A JSON object (a JSON string of one is ' +
+          'also accepted). consistency uses duration_days/frequency/minimum_actions/content_requirements; ' +
+          'quality requires quality_metrics.minimum_length and minimum_samples. Checked before payment, so ' +
+          'a bad value is a 400, never a charge.',
+        properties: { ...CONSISTENCY_CRITERIA_PROPERTIES, ...QUALITY_CRITERIA_PROPERTIES },
         required: []
       }
     },
     required: ['agent_id', 'commitment_description', 'platform', 'platform_handle']
   },
-  output: {
-    example: {
-      success: true,
-      commitment_id: 'cmt_kx_ghi789',
-      status: 'monitoring',
-      tier: 'premium',
-      features: ['advanced_scoring', 'ipfs_upload', 'erc8004_submission'],
-      payment_confirmed: true
-    }
-  }
+  output: { example: outputExample('premium') }
 });
 
 // The fields a caller must supply per tier. Single source of truth: the 402
@@ -504,6 +466,35 @@ const REQUIRED_BY_TIER = {
 };
 
 const TIER_DISCOVERY = { basic: basicDiscovery, advanced: advancedDiscovery, premium: premiumDiscovery };
+
+/**
+ * A copy-paste GET form of a tier's example request, for buyers (and OKX AI's
+ * derived call instructions) that pass parameters in the query string.
+ * `criteria` travels as JSON, which the pre-payment parser accepts.
+ */
+function exampleQueryString(tier) {
+  const body = TIER_DISCOVERY[tier].bazaar.info.input.body;
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(body)) {
+    params.set(key, typeof value === 'object' ? JSON.stringify(value) : String(value));
+  }
+  return `/api/x402/verify/${tier}?${params.toString()}`;
+}
+
+/**
+ * How to call a tier: the guide served in the 402 body, and repeated in every
+ * error body so a buyer who got something wrong is shown what right is.
+ */
+function callGuide(tier) {
+  return {
+    method: 'POST',
+    also_accepted: 'GET with the same parameter names in the query string (criteria as a JSON string)',
+    content_type: 'application/json',
+    required: REQUIRED_BY_TIER[tier],
+    example_request: TIER_DISCOVERY[tier].bazaar.info.input.body,
+    example_get: exampleQueryString(tier)
+  };
+}
 
 /**
  * The body served with the 402 challenge.
@@ -523,13 +514,15 @@ function tierDescription(tier) {
     tier,
     price_usdc: pricingConfig.tiers[tier].price_usdc,
     description: pricingConfig.tiers[tier].description,
-    method: 'POST',
-    content_type: 'application/json',
-    required: REQUIRED_BY_TIER[tier],
+    ...callGuide(tier),
     parameters: discovery.schema.properties.input.properties.body,
-    example_request: discovery.info.input.body,
     example_response: discovery.info.output.example,
-    payment: 'Pay per the PAYMENT-REQUIRED header, then repeat this request with the payment header.'
+    delivers:
+      'Immediately: a signed commitment certificate and a baseline of the agent\'s last 7 days of activity. ' +
+      'When the window closes: a signed, IPFS-pinned receipt with the score, fetchable free from next_steps.status_url.',
+    payment:
+      'Pay per the PAYMENT-REQUIRED header, then repeat this request with the payment header. Parameters are ' +
+      'checked before payment is requested, and payment only settles when a verification is created.'
   };
 }
 
@@ -561,6 +554,8 @@ for (const tier of Object.keys(TIER_DISCOVERY)) {
   };
   protectedRoutes[`POST /api/x402/verify/${tier}`] = tierRouteConfig[tier];
   protectedRoutes[`GET /api/x402/verify/${tier}`] = tierRouteConfig[tier];
+  // A HEAD probe (seen from OKX's side) otherwise fell through to a 405.
+  protectedRoutes[`HEAD /api/x402/verify/${tier}`] = tierRouteConfig[tier];
 }
 
 // Check if we should use test mode (no facilitator validation)
@@ -607,20 +602,171 @@ if (PRODUCTION) {
 // sail through the full challenge/sign/resubmit round trip before a route
 // handler's own checks rejected it. These three builders run the same
 // validation and commitment construction each handler used to do inline, and
-// are wired in as `app.post` handlers *before* the payment middleware is
-// mounted below, so Express dispatches them first and a bad request never
-// reaches the point where a 402 is issued. The real handlers further down
-// reuse the already-validated commitment via `req.builtCommitment`.
+// are wired in as `app.post`/`app.get` handlers *before* the payment
+// middleware is mounted below, so Express dispatches them first and a bad
+// request never reaches the point where a 402 is issued. The real handler
+// further down reuses the already-validated commitment via
+// `req.builtCommitment`.
+
+// Per-parameter docs for the "missing" list in an error body.
+const PARAM_GUIDANCE = {
+  agent_id: { type: 'string', example: 'example-agent-123', description: 'Your identifier for the agent being verified' },
+  commitment_description: { type: 'string', example: 'Post at least once a day for 7 days', description: 'What is being verified' },
+  platform: { type: 'string', example: 'clawstr', description: `One of: ${SUPPORTED_PLATFORMS.join(', ')}` },
+  platform_handle: { type: 'string', example: EXAMPLE_CLAWSTR_HANDLE, description: PLATFORM_HANDLE_DOC },
+  criteria: {
+    type: 'object',
+    example: { verification_type: 'consistency', duration_days: 14, frequency: 'daily' },
+    description: 'A JSON object; see the endpoint\'s parameter schema'
+  }
+};
+
+function requireFields(body, fields) {
+  const missing = fields.filter(name => {
+    const value = body[name];
+    return value === undefined || value === null || (typeof value === 'string' && !value.trim());
+  });
+  if (missing.length === 0) return;
+  throw new ValidationError(`Missing required field${missing.length > 1 ? 's' : ''}: ${missing.join(', ')}`, {
+    code: 'MISSING_FIELD',
+    field: missing[0],
+    required: fields,
+    missing: missing.map(name => ({ field: name, ...PARAM_GUIDANCE[name] }))
+  });
+}
+
+// Keys whose values arrive as strings from a query string or form body, and
+// what they must become. Anything else stays a string.
+const NUMERIC_CRITERIA = ['duration_days', 'minimum_actions', 'minimum_samples'];
+
+function toNumberIfNumeric(value) {
+  return typeof value === 'string' && /^-?\d+(\.\d+)?$/.test(value.trim()) ? Number(value) : value;
+}
+
+/**
+ * One parameter shape out of the ways buyers actually send them.
+ *
+ * OKX AI's derived call instructions for this service are a GET with query
+ * parameters, and its schema types `criteria` as a string, so its buyer
+ * tooling coerces it to one. Accept, for criteria: an object (JSON body or
+ * `criteria[duration_days]=7`), a JSON string, or dotted keys
+ * (`criteria.duration_days=7`); and coerce numeric strings to numbers.
+ */
+function normalizeParams(raw) {
+  const params = { ...raw };
+
+  if (typeof params.criteria === 'string') {
+    const text = params.criteria.trim();
+    if (text === '') {
+      delete params.criteria;
+    } else {
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (error) {
+        parsed = undefined;
+      }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new ValidationError('criteria must be a JSON object', {
+          code: 'INVALID_TYPE',
+          field: 'criteria',
+          received: text.length > 80 ? `${text.slice(0, 80)}…` : text,
+          expected: 'A JSON object, or a JSON string of one. Omit it for a 7-day daily consistency check.',
+          example: { duration_days: 7, frequency: 'daily' }
+        });
+      }
+      params.criteria = parsed;
+    }
+  }
+
+  for (const key of Object.keys(params)) {
+    if (!key.startsWith('criteria.')) continue;
+    const criteria = params.criteria && typeof params.criteria === 'object' ? params.criteria : {};
+    criteria[key.slice('criteria.'.length)] = params[key];
+    params.criteria = criteria;
+    delete params[key];
+  }
+
+  if (params.criteria && typeof params.criteria === 'object' && !Array.isArray(params.criteria)) {
+    const criteria = { ...params.criteria };
+    for (const key of NUMERIC_CRITERIA) {
+      if (key in criteria) criteria[key] = toNumberIfNumeric(criteria[key]);
+    }
+    if (criteria.quality_metrics && typeof criteria.quality_metrics === 'object') {
+      criteria.quality_metrics = {
+        ...criteria.quality_metrics,
+        minimum_length: toNumberIfNumeric(criteria.quality_metrics.minimum_length)
+      };
+      if (criteria.quality_metrics.minimum_length === undefined) delete criteria.quality_metrics.minimum_length;
+    }
+    params.criteria = criteria;
+  }
+
+  return params;
+}
+
+function requireCriteriaObject(criteria) {
+  // Checked before the builders spread it, which would otherwise turn a
+  // string into {0:'a',1:'b',...} and hide the bad input from the service layer.
+  if (typeof criteria !== 'object' || criteria === null || Array.isArray(criteria)) {
+    throw new ValidationError('criteria must be an object', {
+      code: 'INVALID_TYPE',
+      field: 'criteria',
+      expected: 'A JSON object, or a JSON string of one',
+      example: { duration_days: 7, frequency: 'daily' }
+    });
+  }
+}
+
+/**
+ * Refuse, before payment, a verification this service could only ever fail.
+ *
+ * The Clawstr collector records each post's time and length and nothing else.
+ * time_bound scoring looks deliveries up by `milestone_id`, which no evidence
+ * carries, so every milestone scores `missed` and the receipt is `failed`
+ * whatever the agent did. quality scoring is sound for `minimum_length` (from
+ * `content_length`) and blind to its other metrics, which read fields no
+ * evidence has. Selling either would take payment for a foregone verdict.
+ */
+function assertScoreable(commitment) {
+  if (commitment.verification_type === 'time_bound') {
+    throw new ValidationError(
+      'verification_type "time_bound" is not available: Clawstr evidence cannot yet be matched to milestones. Use "consistency".',
+      {
+        code: 'UNSUPPORTED_VERIFICATION_TYPE',
+        field: 'verification_type',
+        received: 'time_bound',
+        expected: 'One of: consistency, quality',
+        example: 'consistency'
+      }
+    );
+  }
+  const metrics = commitment.criteria.quality_metrics;
+  // An absent quality_metrics is left to _validateCommitment, which says it is
+  // required; this only judges one that was supplied.
+  if (commitment.verification_type === 'quality' && metrics && typeof metrics === 'object') {
+    const unsupported = Object.keys(metrics).filter(key => key !== 'minimum_length');
+    if (unsupported.length > 0 || metrics.minimum_length === undefined) {
+      throw new ValidationError(
+        unsupported.length
+          ? `criteria.quality_metrics supports only minimum_length on Clawstr; remove: ${unsupported.join(', ')}`
+          : 'criteria.quality_metrics.minimum_length is required for verification_type "quality"',
+        {
+          code: 'UNSUPPORTED_QUALITY_METRIC',
+          field: 'criteria.quality_metrics',
+          received: metrics,
+          expected: 'An object with minimum_length (characters) and nothing else',
+          example: { minimum_length: 200 }
+        }
+      );
+    }
+  }
+}
 
 function buildBasicCommitment(body) {
   const { agent_id, platform, platform_handle, commitment_description, erc8004_token_id, wallet_address } = body;
 
-  if (!agent_id || !platform || !platform_handle) {
-    throw new ValidationError('Missing required fields', {
-      error: 'Missing required fields',
-      required: ['agent_id', 'platform', 'platform_handle']
-    });
-  }
+  requireFields(body, REQUIRED_BY_TIER.basic);
 
   // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
   const target = resolveMonitoringTarget({ platform, platform_handle });
@@ -653,18 +799,8 @@ function buildBasicCommitment(body) {
 function buildAdvancedCommitment(body) {
   const { agent_id, commitment_description, criteria, platform, platform_handle, erc8004_token_id, wallet_address } = body;
 
-  if (!agent_id || !commitment_description || !criteria) {
-    throw new ValidationError('Missing required fields', {
-      error: 'Missing required fields',
-      required: ['agent_id', 'commitment_description', 'criteria', 'platform', 'platform_handle']
-    });
-  }
-
-  // Checked before the spread below, which would otherwise turn a string
-  // into {0:'a',1:'b',...} and hide the bad input from the service layer.
-  if (typeof criteria !== 'object' || Array.isArray(criteria)) {
-    throw new ValidationError('criteria must be an object');
-  }
+  requireFields(body, REQUIRED_BY_TIER.advanced);
+  requireCriteriaObject(criteria);
 
   // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
   const target = resolveMonitoringTarget({ platform, platform_handle });
@@ -687,6 +823,7 @@ function buildAdvancedCommitment(body) {
   };
 
   verificationService._validateCommitment(commitment);
+  assertScoreable(commitment);
   return commitment;
 }
 
@@ -701,22 +838,12 @@ function buildPremiumCommitment(body) {
   // window, so the only effect was forcing a caller to name a polymorphic
   // object whose required shape depends on verification_type — the parameter
   // OKX AI's review called out as one that "cannot be specifically inferred".
-  // A supplied criteria is still validated below, and quality/time_bound still
-  // require their own sub-fields (enforced pre-payment in _validateCommitment).
+  // A supplied criteria is still validated below, and quality still requires
+  // its own sub-fields (enforced pre-payment in _validateCommitment).
   const criteria = body.criteria ?? {};
 
-  if (!agent_id || !commitment_description) {
-    throw new ValidationError('Missing required fields', {
-      error: 'Missing required fields',
-      required: REQUIRED_BY_TIER.premium
-    });
-  }
-
-  // Checked before the spread below, which would otherwise turn a string
-  // into {0:'a',1:'b',...} and hide the bad input from the service layer.
-  if (typeof criteria !== 'object' || Array.isArray(criteria)) {
-    throw new ValidationError('criteria must be an object');
-  }
+  requireFields(body, REQUIRED_BY_TIER.premium);
+  requireCriteriaObject(criteria);
 
   // Throws ValidationError (-> 400, unpaid) if the agent could not be observed.
   const target = resolveMonitoringTarget({ platform, platform_handle });
@@ -737,6 +864,9 @@ function buildPremiumCommitment(body) {
     erc8004_token_id: erc8004_token_id || null
   };
 
+  // Before _validateCommitment, so time_bound gets "not available" rather
+  // than a request for the milestones it could never score.
+  assertScoreable(commitment);
   verificationService._validateCommitment(commitment);
   return commitment;
 }
@@ -745,13 +875,19 @@ function buildPremiumCommitment(body) {
  * Whether a request carried no parameters at all — a discovery probe.
  *
  * express.json() normalizes an absent body, a zero-length body and a non-JSON
- * content type all to `{}`, so `{}` is the whole signal. An array is NOT a
- * probe: `[]` has no keys but is a malformed request and must keep 400ing.
+ * content type all to `{}`, and an absent query string is `{}` too, so `{}` is
+ * the whole signal. An array is NOT a probe: `[]` has no keys but is a
+ * malformed request and must keep 400ing.
  */
-function isParameterlessProbe(body) {
-  return body === undefined
-    || body === null
-    || (typeof body === 'object' && !Array.isArray(body) && Object.keys(body).length === 0);
+function isParameterlessProbe(params) {
+  return params === undefined
+    || params === null
+    || (typeof params === 'object' && !Array.isArray(params) && Object.keys(params).length === 0);
+}
+
+// The request's parameters: the query string for GET/HEAD, the body otherwise.
+function requestParams(req) {
+  return req.method === 'GET' || req.method === 'HEAD' ? req.query : req.body;
 }
 
 // Builds and validates the commitment, or sends the appropriate 400/500 and
@@ -759,22 +895,30 @@ function isParameterlessProbe(body) {
 // included) ever sees an invalid request.
 function validateAndBuild(tier, builder) {
   return (req, res, next) => {
+    const params = requestParams(req);
     // A caller who supplied no parameters gets the 402 challenge, which is
     // what carries the Bazaar schema naming the parameters. Answering 400 here
     // instead was a chicken-and-egg: you had to already know the parameters to
     // be told what they are, and it is why OKX AI's discovery probe could
     // never read this service. Nothing was supplied, so there is nothing to
-    // validate — and a request that DOES carry a body still runs the full
+    // validate — and a request that DOES carry parameters still runs the full
     // builder below before reaching the payment middleware.
-    if (isParameterlessProbe(req.body)) {
+    if (isParameterlessProbe(params)) {
       req.builtCommitment = undefined;
       return next();
     }
     try {
-      req.builtCommitment = builder(req.body);
+      if (Array.isArray(params)) {
+        throw new ValidationError('Request body must be a JSON object, not an array', {
+          code: 'INVALID_TYPE',
+          field: 'body',
+          expected: 'A JSON object of named parameters'
+        });
+      }
+      req.builtCommitment = builder(normalizeParams(params));
       next();
     } catch (error) {
-      sendVerificationError(res, tier, error);
+      sendVerificationError(req, res, tier, error);
     }
   };
 }
@@ -782,24 +926,109 @@ function validateAndBuild(tier, builder) {
 /**
  * The commitment validateAndBuild prepared, or null after sending a 400.
  *
- * Only absent when a body-less probe arrived carrying a payment header. Must
- * answer 4xx and never 2xx: @x402/express skips settlement when the handler
- * responds >= 400, so the payer is not charged for a request that performs no
- * verification.
+ * Only absent when a parameterless probe arrived carrying a payment header.
+ * Must answer 4xx and never 2xx: @x402/express skips settlement when the
+ * handler responds >= 400, so the payer is not charged for a request that
+ * performs no verification.
  */
 function requireBuiltCommitment(req, res, tier) {
   if (req.builtCommitment) return req.builtCommitment;
-  sendVerificationError(res, tier, new ValidationError('Missing request body', {
-    error: 'Missing request body',
-    required: REQUIRED_BY_TIER[tier.toLowerCase()],
-    hint: 'Send a JSON body. The PAYMENT-REQUIRED challenge on this endpoint documents every parameter and includes a working example.'
+  const lower = tier.toLowerCase();
+  const onQuery = req.method === 'GET' || req.method === 'HEAD';
+  sendVerificationError(req, res, tier, new ValidationError(onQuery ? 'Missing request parameters' : 'Missing request body', {
+    code: 'MISSING_PARAMETERS',
+    required: REQUIRED_BY_TIER[lower],
+    missing: REQUIRED_BY_TIER[lower].map(name => ({ field: name, ...PARAM_GUIDANCE[name] })),
+    hint:
+      'The paid request arrived with no parameters. Repeat it with the parameters: as a JSON body with ' +
+      'Content-Type: application/json on POST, or in the query string on GET. See how_to_call for both forms.'
   }));
   return null;
 }
 
-app.post('/api/x402/verify/basic', validateAndBuild('Basic', buildBasicCommitment));
-app.post('/api/x402/verify/advanced', validateAndBuild('Advanced', buildAdvancedCommitment));
-app.post('/api/x402/verify/premium', validateAndBuild('Premium', buildPremiumCommitment));
+// GET, POST and HEAD all validate before the 402: OKX AI's buyer tooling
+// probes and replays with GET by default, and its derived call instructions
+// for this service are a GET with query parameters.
+for (const [tier, builder] of Object.entries({
+  basic: buildBasicCommitment,
+  advanced: buildAdvancedCommitment,
+  premium: buildPremiumCommitment
+})) {
+  const label = tier.charAt(0).toUpperCase() + tier.slice(1);
+  app.post(`/api/x402/verify/${tier}`, validateAndBuild(label, builder));
+  app.get(`/api/x402/verify/${tier}`, validateAndBuild(label, builder));
+}
+
+// Records what happened to each paid request once the response has gone out.
+//
+// Registered before the payment middleware so its `finish` listener sees the
+// final status and the PAYMENT-RESPONSE header @x402/express sets after
+// settling. Nothing recorded settlement before: the handler saved a payment
+// record marked confirmed *before* settlement ran, with an empty tx hash, so
+// no purchase could be tied to a transaction — or shown to have delivered.
+const PAID_ROUTE = /^\/api\/x402\/verify\/(basic|advanced|premium)$/;
+app.use((req, res, next) => {
+  if (!hasPaymentHeader(req) || !PAID_ROUTE.test(req.path)) return next();
+  res.on('finish', () => {
+    recordSettlementOutcome(req, res).catch(error =>
+      console.error('[x402] Failed to record settlement outcome:', error.message)
+    );
+  });
+  next();
+});
+
+function decodePaymentResponse(header) {
+  if (!header) return null;
+  try {
+    return JSON.parse(Buffer.from(String(header), 'base64').toString('utf8'));
+  } catch (error) {
+    return null;
+  }
+}
+
+async function recordSettlementOutcome(req, res) {
+  const { commitmentId, paymentRecordId } = res.locals;
+  const settlement = decodePaymentResponse(res.getHeader('PAYMENT-RESPONSE'));
+  const where = `${req.method} ${req.path}`;
+
+  if (!commitmentId) {
+    // Rejected before anything was created, so @x402/express did not settle.
+    console.warn(`[x402] Paid ${where} answered ${res.statusCode} without a verification; not settled`);
+    return;
+  }
+
+  if (res.statusCode < 400 && settlement && settlement.success !== false) {
+    console.log(
+      `[x402] Delivered ${commitmentId} and settled: tx ${settlement.transaction || 'unknown'} ` +
+      `on ${settlement.network || 'unknown'} from ${settlement.payer || 'unknown'}`
+    );
+    await dataStore.updateX402Payment(paymentRecordId, {
+      status: 'settled',
+      transaction_hash: settlement.transaction || '',
+      network: settlement.network || null,
+      payer: settlement.payer || null,
+      settled_at: new Date().toISOString()
+    });
+    return;
+  }
+
+  if (res.statusCode < 400) {
+    // TEST_MODE, where no middleware settles.
+    console.log(`[x402] Delivered ${commitmentId} with no settlement header (test mode?)`);
+    return;
+  }
+
+  // The handler created the verification, then settlement failed and the
+  // middleware replaced the delivery with an error. The buyer was not charged.
+  console.error(
+    `[x402] Settlement FAILED after creating ${commitmentId} (${where} -> ${res.statusCode}); ` +
+    'the buyer was not charged and did not receive the delivery'
+  );
+  await dataStore.updateX402Payment(paymentRecordId, {
+    status: 'settlement_failed',
+    failed_at: new Date().toISOString()
+  });
+}
 
 if (!TEST_MODE) {
   // Apply x402 payment middleware (production mode)
@@ -826,26 +1055,6 @@ if (!TEST_MODE) {
 } else {
   console.log('⚠ Running in TEST MODE - x402 payment validation disabled');
   console.log('  Set X402_TEST_MODE=false for production use');
-}
-
-// GET on a paid route describes the service; it never performs a verification.
-//
-// Registered AFTER the payment middleware on purpose: in production an unpaid
-// GET is answered by that middleware with the 402 challenge (the reason these
-// routes are keyed under GET at all), and this handler is reached only if a
-// caller actually paid on GET. It must answer 4xx — @x402/express skips
-// settlement when the handler responds >= 400, so a 200 here would charge for
-// a description. In TEST_MODE, where no middleware is mounted, this is what
-// every GET hits, which keeps the route from falling through to Express's
-// HTML 404.
-for (const tier of Object.keys(REQUIRED_BY_TIER)) {
-  app.get(`/api/x402/verify/${tier}`, (req, res) => {
-    res.status(405).set('Allow', 'POST').json({
-      error: 'Method Not Allowed',
-      message: `GET describes this service; POST performs the ${tier} verification.`,
-      ...tierDescription(tier)
-    });
-  });
 }
 
 // Initialize services
@@ -892,7 +1101,9 @@ async function initializeServices() {
   }
 }
 
-// Helper function to create payment metadata
+// Payment metadata stored on the commitment. Settlement runs after the
+// handler, so the transaction is not known here; recordSettlementOutcome
+// writes it to the payment record once it is.
 function createPaymentMetadata(tier, req) {
   return {
     amount: pricingConfig.tiers[tier].price_usdc,
@@ -900,12 +1111,13 @@ function createPaymentMetadata(tier, req) {
     tier: tier,
     token_used: 'USDC',
     payment_method: 'x402',
-    x402_request_id: req.headers['x-x402-request-id'] || req.headers['x402-request-id'] || 'unknown',
     network: NETWORK_ID,
-    transaction_hash: req.headers['x-x402-tx-hash'] || req.headers['x402-tx-hash'] || '',
     payment_timestamp: new Date().toISOString()
   };
 }
+
+const NOT_CHARGED =
+  'You were not charged: payment only settles when a verification is created. Fix the request and send it again.';
 
 /**
  * Translate a thrown error into a response for the paid verification routes.
@@ -914,18 +1126,34 @@ function createPaymentMetadata(tier, req) {
  * marketplace reviewer the service is broken. Server faults deliberately omit
  * `error.message`, which for an fs or RPC failure would leak container paths
  * and internal endpoints to an anonymous caller.
+ *
+ * Every 400 carries what to fix and how to call the endpoint correctly. OKX
+ * AI delisted this service after buyers retried bare messages — `Invalid
+ * Nostr pubkey "test"`, a raw bech32 checksum error — without ever learning
+ * what a valid request looks like.
  */
-function sendVerificationError(res, tier, error) {
-  if (error.responseBody) {
-    console.warn(`${tier} verification rejected: ${error.message}`);
-    return res.status(error.status || 400).json(error.responseBody);
-  }
+function sendVerificationError(req, res, tier, error) {
+  const lower = tier.toLowerCase();
   if (error.status === 400) {
     console.warn(`${tier} verification rejected: ${error.message}`);
-    return res.status(400).json({ error: 'Invalid request', details: error.message });
+    return res.status(400).json({
+      error: error.message,
+      // `details` duplicates `error` for clients written against the old shape.
+      details: error.message,
+      ...(error.responseBody || {}),
+      ...error.guidance,
+      charged: false,
+      payment_note: NOT_CHARGED,
+      how_to_call: callGuide(lower)
+    });
   }
   console.error(`${tier} verification error:`, error);
-  res.status(500).json({ error: 'Verification creation failed' });
+  res.status(500).json({
+    error: 'Verification creation failed',
+    code: 'SERVER_ERROR',
+    charged: false,
+    payment_note: 'This was a fault on our side and you were not charged. Retrying the same request is safe.'
+  });
 }
 
 /**
@@ -941,129 +1169,142 @@ function buildCriteria(callerCriteria, overrides) {
   return { ...callerCriteria, ...overrides };
 }
 
-// Basic verification endpoint. Parameter validation already ran, before the
-// payment middleware above, in the `validateAndBuild('Basic', ...)` handler
-// registered earlier for this same route.
-app.post('/api/x402/verify/basic', async (req, res) => {
-  try {
-    const commitment = requireBuiltCommitment(req, res, 'Basic');
-    if (!commitment) return;
+function publicBaseUrl(req) {
+  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+}
 
-    // Extract payment metadata from x402 headers
-    const paymentMetadata = createPaymentMetadata('basic', req);
-    commitment.payment = paymentMetadata;
-
-    const verification = await verificationService.createVerification(commitment);
-
-    // Save payment tracking
-    await dataStore.saveX402Payment({
-      x402_request_id: paymentMetadata.x402_request_id,
-      commitment_id: verification.verification_id,
-      amount: paymentMetadata.amount,
-      currency: paymentMetadata.currency,
-      tier: paymentMetadata.tier,
-      transaction_hash: paymentMetadata.transaction_hash
-    });
-
-    res.json({
-      success: true,
-      commitment_id: verification.verification_id,
-      status: verification.status,
-      monitoring_until: verification.expected_completion,
-      tier: 'basic',
-      payment_confirmed: true,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    sendVerificationError(res, 'Basic', error);
+function describeCommitment(verification, commitment) {
+  const criteria = verification.criteria || commitment.criteria;
+  const days = criteria.duration_days;
+  if (commitment.verification_type === 'quality') {
+    return `${days}-day quality check (posts of ${criteria.quality_metrics?.minimum_length}+ characters)`;
   }
-});
+  return `${days}-day ${criteria.frequency || 'daily'} consistency, ${criteria.minimum_actions} posts required`;
+}
 
-// Advanced verification endpoint. Parameter validation already ran, before
-// the payment middleware above, in the `validateAndBuild('Advanced', ...)`
-// handler registered earlier for this same route.
-app.post('/api/x402/verify/advanced', async (req, res) => {
-  try {
-    const commitment = requireBuiltCommitment(req, res, 'Advanced');
-    if (!commitment) return;
+function describeBaseline(baseline) {
+  if (baseline.status === 'unavailable') return `Recent activity: unavailable. ${baseline.reason}`;
+  return `Recent activity (${baseline.outlook.replace(/_/g, ' ')}): ${baseline.outlook_reason}`;
+}
 
-    // Extract payment metadata
-    const paymentMetadata = createPaymentMetadata('advanced', req);
-    commitment.payment = paymentMetadata;
+/**
+ * The paid response: what the buyer receives for their payment, right now.
+ *
+ * It used to be only `{commitment_id, status: "monitoring"}` — the result
+ * arriving days later at a URL the response never mentioned. OKX AI expects
+ * a paid call to deliver, and delisted this service over it. Now the buyer
+ * gets a signed certificate of the terms they bought, a baseline of the
+ * agent's recent activity, and exact instructions for fetching the receipt.
+ */
+function buildDeliveryResponse(req, tier, commitment, verification, baseline) {
+  const base = publicBaseUrl(req);
+  const id = verification.verification_id;
+  return {
+    success: true,
+    delivered: ['certificate', 'baseline'],
+    summary:
+      `Monitoring started for ${commitment.agent_id} (${describeCommitment(verification, commitment)}). ` +
+      `${describeBaseline(baseline)} Final signed receipt expected by ${verification.final_receipt_expected_by}.`,
+    commitment_id: id,
+    tier,
+    status: verification.status,
+    monitoring_until: verification.expected_completion,
+    final_receipt_expected_by: verification.final_receipt_expected_by,
+    certificate: verification.certificate,
+    baseline,
+    next_steps: {
+      status_url: `${base}/api/x402/verify/${id}/status`,
+      receipt_url_template: `${base}/api/v1/attestation/{receipt_id}`,
+      how_to_get_the_receipt:
+        'Poll status_url (free). Once status is "verified" or "failed" it includes receipt_id; fetch the signed ' +
+        'receipt from receipt_url_template. Check the certificate and receipt signatures by recovering ' +
+        'signatures.kinetix_signature over signatures.canonical_hash (EIP-191) and comparing to issuer.pubkey.'
+    },
+    payment_confirmed: true,
+    features: pricingConfig.tiers[tier].features,
+    timestamp: new Date().toISOString()
+  };
+}
 
-    const verification = await verificationService.createVerification(commitment);
+// The paid verification, for every tier and both verbs. Parameter validation
+// already ran, before the payment middleware above, in validateAndBuild.
+function handlePaidVerification(tier) {
+  const label = tier.charAt(0).toUpperCase() + tier.slice(1);
+  return async (req, res) => {
+    try {
+      const commitment = requireBuiltCommitment(req, res, label);
+      if (!commitment) return;
 
-    // Save payment tracking
-    await dataStore.saveX402Payment({
-      x402_request_id: paymentMetadata.x402_request_id,
-      commitment_id: verification.verification_id,
-      amount: paymentMetadata.amount,
-      currency: paymentMetadata.currency,
-      tier: paymentMetadata.tier,
-      transaction_hash: paymentMetadata.transaction_hash
-    });
+      commitment.payment = createPaymentMetadata(tier, req);
 
-    res.json({
-      success: true,
-      commitment_id: verification.verification_id,
-      status: verification.status,
-      monitoring_until: verification.expected_completion,
-      tier: 'advanced',
-      payment_confirmed: true,
-      timestamp: new Date().toISOString()
-    });
+      const verification = await verificationService.createVerification(commitment);
+      res.locals.commitmentId = verification.verification_id;
 
-  } catch (error) {
-    sendVerificationError(res, 'Advanced', error);
-  }
-});
+      const payment = await dataStore.saveX402Payment({
+        commitment_id: verification.verification_id,
+        amount: commitment.payment.amount,
+        currency: commitment.payment.currency,
+        tier,
+        transaction_hash: ''
+      });
+      res.locals.paymentRecordId = payment.payment_id;
 
-// Premium verification endpoint. Parameter validation already ran, before
-// the payment middleware above, in the `validateAndBuild('Premium', ...)`
-// handler registered earlier for this same route.
-app.post('/api/x402/verify/premium', async (req, res) => {
-  try {
-    const commitment = requireBuiltCommitment(req, res, 'Premium');
-    if (!commitment) return;
+      // Bounded and never throws: a relay outage degrades the snapshot, not
+      // the delivery.
+      const baseline = await buildBaseline({
+        pubkey: commitment.pubkey,
+        verification_type: commitment.verification_type,
+        criteria: verification.criteria || commitment.criteria
+      });
 
-    // Extract payment metadata
-    const paymentMetadata = createPaymentMetadata('premium', req);
-    commitment.payment = paymentMetadata;
+      res.json(buildDeliveryResponse(req, tier, commitment, verification, baseline));
+    } catch (error) {
+      sendVerificationError(req, res, label, error);
+    }
+  };
+}
 
-    const verification = await verificationService.createVerification(commitment);
+for (const tier of Object.keys(REQUIRED_BY_TIER)) {
+  app.post(`/api/x402/verify/${tier}`, handlePaidVerification(tier));
+  app.get(`/api/x402/verify/${tier}`, handlePaidVerification(tier));
+}
 
-    // Save payment tracking
-    await dataStore.saveX402Payment({
-      x402_request_id: paymentMetadata.x402_request_id,
-      commitment_id: verification.verification_id,
-      amount: paymentMetadata.amount,
-      currency: paymentMetadata.currency,
-      tier: paymentMetadata.tier,
-      transaction_hash: paymentMetadata.transaction_hash
-    });
-
-    res.json({
-      success: true,
-      commitment_id: verification.verification_id,
-      status: verification.status,
-      monitoring_until: verification.expected_completion,
-      tier: 'premium',
-      payment_confirmed: true,
-      features: pricingConfig.tiers.premium.features,
-      timestamp: new Date().toISOString()
-    });
-
-  } catch (error) {
-    sendVerificationError(res, 'Premium', error);
-  }
+// Unknown routes: JSON, not Express's HTML page, so an agent client can read it.
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not found',
+    code: 'NOT_FOUND',
+    endpoints: {
+      verify: 'POST (or GET) /api/x402/verify/premium',
+      status: 'GET /api/x402/verify/{commitment_id}/status',
+      receipt: 'GET /api/v1/attestation/{receipt_id}',
+      health: 'GET /health'
+    }
+  });
 });
 
 // Error handler
 app.use((err, req, res, next) => {
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({
+      error: 'Request body is not valid JSON',
+      code: 'INVALID_JSON',
+      details: err.message,
+      charged: false,
+      payment_note: NOT_CHARGED,
+      how_to_call: callGuide('premium')
+    });
+  }
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      error: 'Request body too large (limit 100kb)',
+      code: 'BODY_TOO_LARGE',
+      charged: false
+    });
+  }
   const status = err.status || 500;
   if (status === 400) {
-    return res.status(400).json({ error: 'Invalid request', details: err.message });
+    return res.status(400).json({ error: 'Invalid request', details: err.message, charged: false });
   }
   console.error('Server error:', err);
   res.status(status).json({ error: 'Internal server error' });
@@ -1088,10 +1329,10 @@ function start() {
         console.log(`  GET  /health                          - Free health check`);
         console.log(`  GET  /api/v1/attestation/:receipt_id  - Free receipt lookup`);
         console.log(`  GET  /api/x402/verify/:id/status      - Free status check`);
-        console.log(`  GET  /api/x402/verify/<tier>          - 402 challenge + parameter schema`);
-        console.log(`  POST /api/x402/verify/basic           - $${pricingConfig.tiers.basic.price_usdc} USDC`);
-        console.log(`  POST /api/x402/verify/advanced        - $${pricingConfig.tiers.advanced.price_usdc} USDC`);
-        console.log(`  POST /api/x402/verify/premium         - $${pricingConfig.tiers.premium.price_usdc} USDC`);
+        console.log(`  POST|GET /api/x402/verify/basic       - $${pricingConfig.tiers.basic.price_usdc} USDC`);
+        console.log(`  POST|GET /api/x402/verify/advanced    - $${pricingConfig.tiers.advanced.price_usdc} USDC`);
+        console.log(`  POST|GET /api/x402/verify/premium     - $${pricingConfig.tiers.premium.price_usdc} USDC`);
+        console.log(`  (no parameters -> 402 challenge + parameter schema)`);
         console.log(`\nReady for autonomous agent payments!\n`);
       });
 
