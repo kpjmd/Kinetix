@@ -148,6 +148,18 @@ async function checkPaymentChallenge() {
   }
   check('challenge decodes', true, `x402Version=${challenge.x402Version}`);
 
+  // OKX's buyer CLI replays a paid call carrying ONLY the params declared
+  // here (a flat name -> {type, required} map); without it a real buyer's
+  // paid replay arrived with no parameters (2026-10-01).
+  const declared = challenge.outputSchema?.input || {};
+  const requiredDeclared = Object.keys(declared).filter(k => declared[k]?.required).sort();
+  check(
+    'challenge declares outputSchema params for OKX\'s buyer replay',
+    challenge.outputSchema?.method === 'GET' &&
+      JSON.stringify(requiredDeclared) === JSON.stringify(['agent_id', 'commitment_description', 'platform', 'platform_handle']),
+    `method=${challenge.outputSchema?.method}, required=${JSON.stringify(requiredDeclared)}`
+  );
+
   // Behind Railway's TLS proxy, without `trust proxy` this read http://, and
   // a client following it was 301'd — turning a paid POST into a body-less GET.
   if (baseUrl.startsWith('https://')) {

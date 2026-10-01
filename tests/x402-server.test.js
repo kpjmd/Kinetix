@@ -788,6 +788,24 @@ describe('x402 verification server', () => {
       expect(record.status).toBe('pending_settlement');
     });
 
+    it('declares parameters where OKX\'s buyer CLI reads them, so its paid replay carries them', () => {
+      // `onchainos payment pay` replays with only the params named in the
+      // challenge's top-level outputSchema.input; without it a real buyer's
+      // paid replay arrived empty (2026-10-01).
+      const challenge = { x402Version: 2, accepts: [{ scheme: 'exact' }] };
+      const encoded = Buffer.from(JSON.stringify(challenge)).toString('base64');
+      const out = JSON.parse(Buffer.from(server.withOutputSchema(encoded, 'premium'), 'base64').toString('utf8'));
+
+      expect(out.accepts).toEqual(challenge.accepts);
+      expect(out.outputSchema.method).toBe('GET');
+      expect(out.outputSchema.input.platform_handle).toMatchObject({ type: 'string', required: true });
+      expect(out.outputSchema.input.criteria).toMatchObject({ type: 'object', required: false });
+      expect(Object.keys(out.outputSchema.input).filter(k => out.outputSchema.input[k].required).sort())
+        .toEqual(['agent_id', 'commitment_description', 'platform', 'platform_handle']);
+      // A header it cannot parse passes through untouched.
+      expect(server.withOutputSchema('not base64 json', 'premium')).toBe('not base64 json');
+    });
+
     it.each(['basic', 'advanced', 'premium'])(
       'the advertised %s examples succeed verbatim, as POST and as GET',
       async tier => {

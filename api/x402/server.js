@@ -959,6 +959,58 @@ for (const [tier, builder] of Object.entries({
   app.get(`/api/x402/verify/${tier}`, validateAndBuild(label, builder));
 }
 
+/**
+ * The parameter declaration OKX AI's buyer CLI reads to replay a paid call.
+ *
+ * `onchainos payment quote` captures a buyer's `--param` values, but
+ * `payment pay` replays the paid request to the bare endpoint carrying ONLY
+ * the parameters named in the challenge's top-level `outputSchema.input` —
+ * a flat map of name -> {type, required, description} — using
+ * `outputSchema.method`. It does not read the Bazaar extension. Without this
+ * every OKX buyer's paid replay arrived with no parameters and got a 400: the
+ * "no delivery after payment" OKX delisted this service for (reproduced with
+ * a real buyer wallet on 2026-10-01). Shape established by quoting variants
+ * with the CLI itself, which never signs.
+ *
+ * GET because the CLI sends planned parameters in the query string, which the
+ * paid routes accept as a full alias of a POST body.
+ */
+function okxOutputSchema(tier) {
+  const body = TIER_DISCOVERY[tier].bazaar.schema.properties.input.properties.body;
+  const required = body.required || [];
+  const input = {};
+  for (const [name, spec] of Object.entries(body.properties)) {
+    input[name] = {
+      type: spec.type,
+      required: required.includes(name),
+      ...(spec.description ? { description: spec.description } : {})
+    };
+  }
+  return { method: 'GET', input };
+}
+
+// Adds okxOutputSchema to the PAYMENT-REQUIRED header @x402/express emits.
+// Payment matching compares only the chosen `accepts` entry, so a top-level
+// field changes nothing about how a payment verifies.
+function withOutputSchema(encoded, tier) {
+  try {
+    const challenge = JSON.parse(Buffer.from(String(encoded), 'base64').toString('utf8'));
+    challenge.outputSchema = okxOutputSchema(tier);
+    return Buffer.from(JSON.stringify(challenge)).toString('base64');
+  } catch (error) {
+    return encoded;
+  }
+}
+
+app.use((req, res, next) => {
+  const match = /^\/api\/x402\/verify\/(basic|advanced|premium)$/.exec(req.path);
+  if (!match) return next();
+  const setHeader = res.setHeader.bind(res);
+  res.setHeader = (name, value) =>
+    setHeader(name, String(name).toLowerCase() === 'payment-required' ? withOutputSchema(value, match[1]) : value);
+  next();
+});
+
 // Records what happened to each paid request once the response has gone out.
 //
 // Registered before the payment middleware so its `finish` listener sees the
@@ -1400,3 +1452,4 @@ module.exports.initializeServices = initializeServices;
 // OKX review rounds (GET keys missing), and asserting on it directly catches
 // that in CI rather than only against a live deploy.
 module.exports.protectedRoutes = protectedRoutes;
+module.exports.withOutputSchema = withOutputSchema;
