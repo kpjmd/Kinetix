@@ -4,6 +4,8 @@
 const fs = require('fs').promises;
 const path = require('path');
 const dataStore = require('./data-store');
+const { COLLECTOR_PLATFORMS } = require('../utils/monitoring-target');
+const { ValidationError } = require('../utils/validation-error');
 
 const DISCOVERY_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, '../data'), 'discovery-queue');
 
@@ -225,13 +227,14 @@ class DiscoveryService {
 
     // Build commitment from the suggested verification
     const sv = suggestion.suggested_verification;
+    const criteria = this._monitorableCriteria(suggestion);
     const commitment = {
       agent_id: suggestion.agent_id,
       pubkey: suggestion.agent_pubkey || '',
       platform_profiles: {},
       description: sv.description,
       verification_type: sv.verification_type,
-      criteria: sv.criteria,
+      criteria,
       erc8004_token_id: suggestion.agent_erc8004_token_id || null,
       // Previously missing entirely: a discovery-sourced commitment could
       // never carry an EVM wallet, so attestation-service.js always blanked
@@ -264,6 +267,34 @@ class DiscoveryService {
 
     this._log(`Approved ${id} -> verification ${result.verification_id}`);
     return result;
+  }
+
+  /**
+   * The suggestion's criteria, pinned to a platform Kinetix can monitor.
+   *
+   * The heartbeat model fills criteria.platform with whatever a claim is about
+   * ("shipping on Base" -> base_l2), not where the agent can be watched. Only
+   * the source platform gets a profile below, so any other value creates a
+   * commitment nothing can collect for. Thrown before createVerification so
+   * the suggestion stays pending for a human instead.
+   */
+  _monitorableCriteria(suggestion) {
+    const criteria = { ...(suggestion.suggested_verification?.criteria || {}) };
+    if (!criteria.platform) criteria.platform = suggestion.source_platform;
+
+    if (!COLLECTOR_PLATFORMS.includes(criteria.platform)) {
+      throw new ValidationError(
+        `Cannot monitor platform "${criteria.platform}" for ${suggestion.id}: ` +
+        `only ${COLLECTOR_PLATFORMS.join(', ')} have evidence collectors`
+      );
+    }
+    if (criteria.platform !== suggestion.source_platform) {
+      throw new ValidationError(
+        `Suggestion ${suggestion.id} came from ${suggestion.source_platform} but asks to ` +
+        `monitor ${criteria.platform}; Kinetix only knows the agent's ${suggestion.source_platform} identity`
+      );
+    }
+    return criteria;
   }
 
   /**

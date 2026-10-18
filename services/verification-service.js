@@ -234,6 +234,12 @@ class VerificationService {
   _collectionSummary(commitment) {
     const monitoring = commitment.monitoring;
 
+    // Closed without a receipt (see closeAsUnverifiable). `closed_reason` is
+    // left out for the same reason as `last_error` below.
+    if (commitment.status === 'unverifiable') {
+      return { state: 'unverifiable' };
+    }
+
     // Nothing collects for this commitment: the free API route, or a platform
     // with no collector. Saying "awaiting collection" would be a lie.
     if (!monitoring) {
@@ -354,6 +360,14 @@ class VerificationService {
       return commitment.scoring_result;
     }
 
+    // Checked before readiness: no amount of waiting makes these scoreable, and
+    // throwing instead left the commitment active to crash again every tick.
+    const unscoreable = this._scoringPrerequisites(commitment);
+    if (unscoreable) {
+      await this._closeAsUnverifiable(commitment, unscoreable);
+      return null;
+    }
+
     const readiness = this._collectionReadiness(commitment);
     if (!readiness.ready) {
       this._log(`Deferring scoring for ${verificationId}: ${readiness.reason}`);
@@ -397,6 +411,82 @@ class VerificationService {
     }
 
     return result;
+  }
+
+  /**
+   * Close a commitment that can never be scored, without issuing a receipt.
+   *
+   * Scoring one anyway would sign a `failed` verdict on an agent Kinetix was
+   * never able to observe — no collector for its platform, no identity to
+   * watch, or criteria the scorers cannot read. Leaving it `active` instead
+   * strands it forever, and because the monitoring queue runs soonest-ending
+   * first, every such commitment takes a slot from a real one on every tick.
+   *
+   * Serialized with scoreVerification so the two can never both act on one id.
+   */
+  async closeAsUnverifiable(verificationId, reason) {
+    const inFlight = this._scoringInFlight.get(verificationId);
+    if (inFlight) {
+      // Its outcome is the scorer's to report; this only needs it finished.
+      await inFlight.catch(() => {});
+    }
+
+    const run = (async () => {
+      const commitment = await dataStore.loadCommitment(verificationId);
+      if (!commitment) {
+        throw new Error(`Commitment not found: ${verificationId}`);
+      }
+      if (commitment.status !== 'active') return commitment;
+      return this._closeAsUnverifiable(commitment, reason);
+    })().finally(() => {
+      this._scoringInFlight.delete(verificationId);
+    });
+    this._scoringInFlight.set(verificationId, run);
+    return run;
+  }
+
+  async _closeAsUnverifiable(commitment, reason) {
+    commitment.status = 'unverifiable';
+    commitment.closed_reason = reason;
+    commitment.closed_at = new Date().toISOString();
+    await dataStore.saveCommitment(commitment);
+    this._log(`Closed ${commitment.commitment_id} as unverifiable: ${reason}`);
+    return commitment;
+  }
+
+  /**
+   * Why a commitment cannot be scored, or null if it can.
+   *
+   * Deliberately narrower than _validateCommitment: it covers only what the
+   * scorers dereference. Commitments created before 773a932 (2026-08-19) were
+   * never validated, and the full check would also reject legacy consistency
+   * records that resolveMinimumActions already scores safely.
+   */
+  _scoringPrerequisites(commitment) {
+    const criteria = commitment.criteria;
+    if (!criteria || typeof criteria !== 'object') {
+      return 'commitment has no criteria';
+    }
+
+    switch (commitment.verification_type) {
+      case 'consistency':
+        return null;
+      case 'quality':
+        if (!criteria.quality_metrics || typeof criteria.quality_metrics !== 'object') {
+          return 'quality commitment has no criteria.quality_metrics';
+        }
+        if (!(Number(criteria.minimum_samples) > 0)) {
+          return 'quality commitment has no usable criteria.minimum_samples';
+        }
+        return null;
+      case 'time_bound':
+        if (!Array.isArray(criteria.milestones) || criteria.milestones.length === 0) {
+          return 'time_bound commitment has no criteria.milestones';
+        }
+        return null;
+      default:
+        return `unknown verification type: ${commitment.verification_type}`;
+    }
   }
 
   /**

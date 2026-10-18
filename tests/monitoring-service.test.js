@@ -17,6 +17,7 @@ jest.mock('../utils/clawstr-api', () => ({
 
 const dataStore = require('../services/data-store');
 const clawstrApi = require('../utils/clawstr-api');
+const moltbookApi = require('../utils/moltbook-api');
 const { MonitoringService } = require('../services/monitoring-service');
 
 function makeCommitment(overrides = {}) {
@@ -35,7 +36,8 @@ function makeCommitment(overrides = {}) {
 function makeVerificationService() {
   return {
     addEvidence: jest.fn().mockResolvedValue(undefined),
-    scoreVerification: jest.fn().mockResolvedValue(undefined)
+    scoreVerification: jest.fn().mockResolvedValue(undefined),
+    closeAsUnverifiable: jest.fn().mockResolvedValue(undefined)
   };
 }
 
@@ -394,13 +396,117 @@ describe('MonitoringService Clawstr collection', () => {
     expect(verificationService.scoreVerification).not.toHaveBeenCalled();
   });
 
-  it('treats an undecodable pubkey as nothing to collect, not a retryable fault', async () => {
+  it('closes an undecodable pubkey rather than retrying it or scoring it', async () => {
     await service.checkCommitment(makeCommitment({ pubkey: 'not-a-key', platform_profiles: {} }));
 
     expect(clawstrApi.getEventsByAuthor).not.toHaveBeenCalled();
     expect(verificationService.addEvidence).not.toHaveBeenCalled();
-    const saved = dataStore.saveCommitment.mock.calls[0][0];
-    // Retrying an unparseable key forever would never succeed.
-    expect(saved.monitoring.last_success_at).toEqual(expect.any(String));
+    // Retrying an unparseable key forever would never succeed, and recording it
+    // as a successful empty collection scored it as a `failed` receipt.
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+      'cmt_kx_test',
+      expect.stringContaining('unusable Clawstr pubkey')
+    );
+  });
+});
+
+describe('MonitoringService unmonitorable commitments', () => {
+  let service;
+  let verificationService;
+
+  // Already past end_date: the case that used to either crash every tick or
+  // be scored as a `failed` receipt for an agent we could not watch.
+  const ended = overrides => makeCommitment({
+    end_date: new Date(Date.now() - 3600000).toISOString(),
+    ...overrides
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new MonitoringService();
+    verificationService = makeVerificationService();
+    service.initialize(verificationService);
+    dataStore.loadCommitment.mockImplementation(async id => ended({ commitment_id: id }));
+    dataStore.saveCommitment.mockResolvedValue(undefined);
+  });
+
+  it.each(['base_l2', 'github', undefined])(
+    'closes a commitment on platform %s instead of skipping it forever',
+    async platform => {
+      await service.checkCommitment(ended({ criteria: { platform } }));
+
+      expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+        'cmt_kx_test',
+        expect.stringContaining('no evidence collector')
+      );
+      expect(verificationService.scoreVerification).not.toHaveBeenCalled();
+    }
+  );
+
+  it('closes a commitment with no criteria at all', async () => {
+    await service.checkCommitment(ended({ criteria: undefined }));
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalled();
+  });
+
+  it('closes a Clawstr commitment with no pubkey rather than scoring zero evidence', async () => {
+    await service.checkCommitment(ended({ pubkey: '', platform_profiles: {} }));
+
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+      'cmt_kx_test',
+      'no Clawstr pubkey to monitor'
+    );
+    expect(clawstrApi.getEventsByAuthor).not.toHaveBeenCalled();
+    expect(verificationService.scoreVerification).not.toHaveBeenCalled();
+  });
+
+  it('closes a Clawstr commitment whose pubkey cannot be decoded', async () => {
+    await service.checkCommitment(ended({ pubkey: 'not-a-key' }));
+
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+      'cmt_kx_test',
+      expect.stringContaining('unusable Clawstr pubkey')
+    );
+    expect(verificationService.scoreVerification).not.toHaveBeenCalled();
+  });
+
+  it('closes a Moltbook commitment with no profile', async () => {
+    await service.checkCommitment(ended({ criteria: { platform: 'moltbook' }, platform_profiles: {} }));
+
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+      'cmt_kx_test',
+      'no Moltbook profile to monitor'
+    );
+    expect(moltbookApi.search).not.toHaveBeenCalled();
+  });
+
+  it('records a Moltbook outage as a failed collection, not as inactivity', async () => {
+    moltbookApi.search.mockRejectedValue(new Error('503'));
+
+    await service.checkCommitment(ended({
+      criteria: { platform: 'moltbook' },
+      platform_profiles: { moltbook: 'someagent' }
+    }));
+
+    const saved = dataStore.saveCommitment.mock.calls.at(-1)[0];
+    expect(saved.monitoring.last_error).toBe('503');
+    expect(saved.monitoring.consecutive_failures).toBe(1);
+    expect(saved.monitoring.last_success_at).toBeNull();
+    // Still offered, so verification-service's grace window decides.
+    expect(verificationService.scoreVerification).toHaveBeenCalled();
+    expect(verificationService.closeAsUnverifiable).not.toHaveBeenCalled();
+  });
+
+  it('still collects a Moltbook commitment that has a profile', async () => {
+    moltbookApi.search.mockResolvedValue({
+      posts: [{ id: 'p1', created_at: new Date().toISOString(), content: 'hello' }]
+    });
+
+    await service.checkCommitment(makeCommitment({
+      criteria: { platform: 'moltbook' },
+      platform_profiles: { moltbook: 'someagent' }
+    }));
+
+    expect(verificationService.addEvidence).toHaveBeenCalledTimes(1);
+    expect(verificationService.closeAsUnverifiable).not.toHaveBeenCalled();
   });
 });

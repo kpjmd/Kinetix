@@ -372,6 +372,8 @@ For each claim or request found, add to a "discoveries" array:
   }
 }
 
+criteria.platform MUST equal source_platform: Kinetix can only observe the agent's own posts on the platform you saw them on. Skip claims that could only be checked somewhere else (a blockchain, GitHub, a website, another network).
+
 Only include medium/high confidence. Limit to 3 max.
 
 Return JSON:

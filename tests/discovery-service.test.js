@@ -95,4 +95,65 @@ describe('DiscoveryService dedup', () => {
       expect.objectContaining({ wallet_address: '' })
     );
   });
+
+  describe('platform validation on approve', () => {
+    const withCriteria = (criteria, overrides = {}) => makeRequest({
+      suggested_verification: { verification_type: 'consistency', description: 'd', criteria },
+      ...overrides
+    });
+
+    it('fills a missing criteria.platform from the source platform', async () => {
+      const createVerification = jest.fn().mockResolvedValue({ verification_id: 'v1' });
+      const request = await discoveryService.addVerificationRequest(withCriteria({ frequency: 'daily' }));
+
+      discoveryService.initialize({ createVerification }, null);
+      await discoveryService.approveSuggestion(request.id, 'admin');
+
+      expect(createVerification).toHaveBeenCalledWith(expect.objectContaining({
+        criteria: { frequency: 'daily', platform: 'moltbook' }
+      }));
+    });
+
+    it.each(['base_l2', 'github', 'algorand'])(
+      'rejects a claim about %s, which nothing can collect for, and leaves it pending',
+      async platform => {
+        const createVerification = jest.fn();
+        const request = await discoveryService.addVerificationRequest(withCriteria({ platform }));
+
+        discoveryService.initialize({ createVerification }, null);
+        await expect(discoveryService.approveSuggestion(request.id, 'kinetix_autonomous'))
+          .rejects.toThrow(/Cannot monitor platform/);
+
+        expect(createVerification).not.toHaveBeenCalled();
+        expect((await discoveryService.getSuggestion(request.id)).status).toBe('pending');
+      }
+    );
+
+    it('rejects a platform other than the one the agent was seen on', async () => {
+      const createVerification = jest.fn();
+      const request = await discoveryService.addVerificationRequest(
+        withCriteria({ platform: 'moltbook' }, { source_platform: 'clawstr', agent_pubkey: 'abc' })
+      );
+
+      discoveryService.initialize({ createVerification }, null);
+      await expect(discoveryService.approveSuggestion(request.id, 'admin'))
+        .rejects.toThrow(/came from clawstr/);
+      expect(createVerification).not.toHaveBeenCalled();
+    });
+
+    it('approves a clawstr suggestion on clawstr', async () => {
+      const createVerification = jest.fn().mockResolvedValue({ verification_id: 'v1' });
+      const request = await discoveryService.addVerificationRequest(
+        withCriteria({ platform: 'clawstr' }, { source_platform: 'clawstr', agent_pubkey: 'abc' })
+      );
+
+      discoveryService.initialize({ createVerification }, null);
+      await discoveryService.approveSuggestion(request.id, 'admin');
+
+      expect(createVerification).toHaveBeenCalledWith(expect.objectContaining({
+        platform_profiles: { clawstr: 'abc' },
+        criteria: { platform: 'clawstr' }
+      }));
+    });
+  });
 });

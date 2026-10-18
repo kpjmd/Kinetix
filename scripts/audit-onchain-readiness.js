@@ -149,7 +149,8 @@ async function main() {
     };
   });
 
-  const inFlight = commitmentRows.filter(c => c.status !== 'attested');
+  // unverifiable is terminal and never produces a receipt, so never anchors.
+  const inFlight = commitmentRows.filter(c => c.status !== 'attested' && c.status !== 'unverifiable');
 
   // ---- Attestations ----
   // attestationService.verifyReceipt() logs unconditionally via console.log

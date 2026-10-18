@@ -28,6 +28,13 @@ const { normalizeNostrPubkey } = require('./clawstr-api');
 // through to "not yet implemented" and collects nothing.
 const SUPPORTED_PLATFORMS = ['clawstr'];
 
+// Platforms with any collector at all — the wider set the unpaid paths
+// (heartbeat discovery, the Telegram tool) may create commitments on. Anything
+// outside it can never collect evidence and would sit `active` forever, so
+// those paths reject it up front and monitoring closes existing ones as
+// `unverifiable`.
+const COLLECTOR_PLATFORMS = ['moltbook', 'clawstr'];
+
 // A known-valid handle to offer in error guidance: Kinetix's own Clawstr
 // identity, which posts on a heartbeat and so also gives a buyer testing the
 // service a non-empty baseline. Kept here, beside the only parser it must
@@ -126,4 +133,9 @@ function resolveMonitoringTarget({ platform, platform_handle }) {
   };
 }
 
-module.exports = { resolveMonitoringTarget, SUPPORTED_PLATFORMS, EXAMPLE_CLAWSTR_HANDLE };
+module.exports = {
+  resolveMonitoringTarget,
+  SUPPORTED_PLATFORMS,
+  COLLECTOR_PLATFORMS,
+  EXAMPLE_CLAWSTR_HANDLE
+};
