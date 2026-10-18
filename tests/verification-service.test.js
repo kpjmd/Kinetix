@@ -538,4 +538,78 @@ describe('VerificationService', () => {
       expect(dataStore.saveCommitment).not.toHaveBeenCalled();
     });
   });
+
+  describe('unscoreable commitments', () => {
+    const ended = overrides => ({
+      commitment_id: 'cmt_kx_test',
+      status: 'active',
+      end_date: new Date(Date.now() - 3600000).toISOString(),
+      evidence: [],
+      ...overrides
+    });
+
+    let generateReceipt;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      dataStore.saveCommitment.mockResolvedValue(undefined);
+      generateReceipt = jest.fn();
+      service.attestationService = { generateReceipt };
+    });
+
+    it.each([
+      // Pre-773a932 records: these crashed on every tick with
+      // "Cannot read properties of undefined (reading 'response_time_minutes')"
+      // and "(reading 'forEach')" respectively.
+      ['quality without quality_metrics', { verification_type: 'quality', criteria: { platform: 'clawstr' } }],
+      ['quality without minimum_samples', { verification_type: 'quality', criteria: { quality_metrics: { minimum_length: 10 } } }],
+      ['time_bound without milestones', { verification_type: 'time_bound', criteria: { platform: 'clawstr' } }],
+      ['time_bound with no milestones', { verification_type: 'time_bound', criteria: { milestones: [] } }],
+      ['an unknown verification type', { verification_type: 'vibes', criteria: {} }],
+      ['no criteria', { verification_type: 'consistency', criteria: undefined }]
+    ])('closes %s as unverifiable without a receipt', async (_label, overrides) => {
+      const commitment = ended(overrides);
+      dataStore.loadCommitment.mockResolvedValue(commitment);
+
+      await expect(service.scoreVerification('cmt_kx_test')).resolves.toBeNull();
+
+      expect(commitment.status).toBe('unverifiable');
+      expect(commitment.closed_reason).toEqual(expect.any(String));
+      expect(commitment.scoring_result).toBeUndefined();
+      expect(generateReceipt).not.toHaveBeenCalled();
+    });
+
+    it('still scores a legacy consistency commitment with no minimum_actions', async () => {
+      expect(service._scoringPrerequisites({
+        verification_type: 'consistency',
+        criteria: { frequency: 'daily', duration_days: 7 }
+      })).toBeNull();
+    });
+
+    it('closeAsUnverifiable leaves an already-closed commitment alone', async () => {
+      const commitment = ended({ status: 'attested' });
+      dataStore.loadCommitment.mockResolvedValue(commitment);
+
+      await service.closeAsUnverifiable('cmt_kx_test', 'no collector');
+
+      expect(commitment.status).toBe('attested');
+      expect(dataStore.saveCommitment).not.toHaveBeenCalled();
+    });
+
+    it('closeAsUnverifiable waits for an in-flight scoring run instead of racing it', async () => {
+      const commitment = ended({ verification_type: 'consistency', criteria: {} });
+      dataStore.loadCommitment.mockResolvedValue(commitment);
+      let finish;
+      service._scoringInFlight.set('cmt_kx_test', new Promise(resolve => {
+        finish = () => { commitment.status = 'attested'; resolve(); };
+      }));
+
+      const closing = service.closeAsUnverifiable('cmt_kx_test', 'no collector');
+      finish();
+      await closing;
+
+      expect(commitment.status).toBe('attested');
+      expect(service._scoringInFlight.has('cmt_kx_test')).toBe(false);
+    });
+  });
 });

@@ -1,6 +1,9 @@
 // /utils/nlp-verification.js
 // Claude tool definitions for verification operations
 
+const { COLLECTOR_PLATFORMS } = require('./monitoring-target');
+const { normalizeNostrPubkey } = require('./clawstr-api');
+
 const VERIFICATION_TOOLS = [
   {
     name: 'verification_create',
@@ -23,7 +26,8 @@ const VERIFICATION_TOOLS = [
         },
         platform: {
           type: 'string',
-          description: 'Platform to monitor (moltbook, clawstr, telegram, etc.)'
+          enum: COLLECTOR_PLATFORMS,
+          description: 'Platform to monitor. agent_id must be the agent\'s identity there: a Moltbook username, or a Clawstr npub/hex pubkey.'
         },
         criteria: {
           type: 'object',
@@ -81,13 +85,37 @@ async function executeVerificationTool(toolName, input, services) {
   switch (toolName) {
     case 'verification_create':
       try {
+        // Without a platform identity the commitment was created unwatchable:
+        // monitoring had no profile or pubkey to fetch, and closed it.
+        if (!COLLECTOR_PLATFORMS.includes(input.platform)) {
+          return {
+            success: false,
+            error: `Unsupported platform "${input.platform}". Kinetix can monitor: ${COLLECTOR_PLATFORMS.join(', ')}`
+          };
+        }
+        let pubkey = '';
+        if (input.platform === 'clawstr') {
+          try {
+            pubkey = normalizeNostrPubkey(input.agent_id);
+          } catch (error) {
+            return {
+              success: false,
+              error: 'For clawstr, agent_id must be the agent\'s npub or 64-character hex pubkey'
+            };
+          }
+        }
+
         const result = await verificationService.createVerification({
           agent_id: input.agent_id,
+          pubkey,
+          platform_profiles: { [input.platform]: input.agent_id },
           description: input.description,
           verification_type: input.verification_type,
           criteria: {
-            platform: input.platform,
-            ...input.criteria
+            ...input.criteria,
+            // After the spread: the validated value must win over any
+            // criteria.platform the model also supplied.
+            platform: input.platform
           }
         });
         return {

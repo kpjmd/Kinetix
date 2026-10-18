@@ -1378,7 +1378,8 @@ bot.command('verification_summary', async (ctx) => {
       attested: '✅',
       verified: '⚠️',
       partial: '🔄',
-      failed: '❌'
+      failed: '❌',
+      unverifiable: '🚫'
     };
 
     let msg = `📊 *Verification Pipeline*\n\n`;

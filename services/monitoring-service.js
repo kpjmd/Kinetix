@@ -153,20 +153,26 @@ class MonitoringService {
    * Check a single commitment for new evidence
    */
   async checkCommitment(commitment) {
-    const platform = commitment.criteria.platform;
+    const platform = commitment.criteria?.platform;
 
     let collected;
     try {
       switch (platform) {
         case 'moltbook':
-          collected = { evidence: await this._collectMoltbookEvidence(commitment), ok: true };
+          collected = await this._collectMoltbookEvidence(commitment);
           break;
         case 'clawstr':
           collected = await this._collectClawstrEvidence(commitment);
           break;
-        // telegram, github, onchain - stubs for Phase 1
         default:
-          this._log(`Platform ${platform} monitoring not yet implemented`);
+          // Nothing will ever collect for this platform (heartbeat discovery
+          // used to record whatever a claim was *about*: base_l2, github…).
+          // Returning here left it active forever, logging every tick and
+          // taking a slot in each capped batch from a commitment we can serve.
+          await this.verificationService.closeAsUnverifiable(
+            commitment.commitment_id,
+            `no evidence collector for platform "${platform}"`
+          );
           return;
       }
     } catch (error) {
@@ -182,6 +188,14 @@ class MonitoringService {
         error: error.message
       });
       if (failed) await this._scoreIfEnded(failed);
+      return;
+    }
+
+    if (collected.unverifiable) {
+      await this.verificationService.closeAsUnverifiable(
+        commitment.commitment_id,
+        collected.unverifiable
+      );
       return;
     }
 
@@ -275,53 +289,56 @@ class MonitoringService {
 
   /**
    * Collect evidence from Moltbook
+   *
+   * @returns {Promise<{evidence: Object[], ok: boolean}|{unverifiable: string}>}
    */
   async _collectMoltbookEvidence(commitment) {
     const agentProfile = commitment.platform_profiles?.moltbook;
     if (!agentProfile) {
-      this._log('No Moltbook profile for commitment', commitment.commitment_id);
-      return [];
+      // Scoring an empty evidence set here would sign a `failed` receipt for
+      // an agent we had no way to watch.
+      return { unverifiable: 'no Moltbook profile to monitor' };
     }
 
-    try {
-      // Search for posts by the agent
-      const results = await moltbookApi.search(agentProfile, 'posts', 50);
-      const posts = results.posts || results.results || results || [];
+    // Deliberately unguarded, as in the Clawstr collector: this used to catch
+    // and return [], which checkCommitment recorded as a successful collection
+    // of nothing — so a Moltbook outage scored as the agent being inactive.
+    const results = await moltbookApi.search(agentProfile, 'posts', 50);
+    const posts = results.posts || results.results || results || [];
 
-      // Filter to posts after commitment start date
-      const startDate = new Date(commitment.start_date);
-      const relevantPosts = posts.filter(post => {
-        const postDate = new Date(post.created_at || post.timestamp);
-        return postDate >= startDate;
-      });
+    // Filter to posts after commitment start date
+    const startDate = new Date(commitment.start_date);
+    const relevantPosts = posts.filter(post => {
+      const postDate = new Date(post.created_at || post.timestamp);
+      return postDate >= startDate;
+    });
 
-      // Convert to evidence format
-      return relevantPosts.map(post => ({
-        timestamp: post.created_at || post.timestamp,
-        platform: 'moltbook',
-        action_type: commitment.criteria.action_type || 'post',
-        action_url: `https://www.moltbook.com/posts/${post.id}`,
-        content_hash: 'sha256:' + crypto.createHash('sha256')
-          .update(post.content || '').digest('hex').slice(0, 32),
-        content_length: (post.content || '').length,
-        content_tags: post.tags || [],
-        content_text: post.content || '',
-        verification_method: 'api_confirmed'
-      }));
-    } catch (error) {
-      this._log(`Moltbook evidence collection error: ${error.message}`);
-      return [];
-    }
+    // Convert to evidence format
+    const evidence = relevantPosts.map(post => ({
+      timestamp: post.created_at || post.timestamp,
+      platform: 'moltbook',
+      action_type: commitment.criteria.action_type || 'post',
+      action_url: `https://www.moltbook.com/posts/${post.id}`,
+      content_hash: 'sha256:' + crypto.createHash('sha256')
+        .update(post.content || '').digest('hex').slice(0, 32),
+      content_length: (post.content || '').length,
+      content_tags: post.tags || [],
+      content_text: post.content || '',
+      verification_method: 'api_confirmed'
+    }));
+
+    return { evidence, ok: true };
   }
 
   /**
    * Collect evidence from Clawstr
+   *
+   * @returns {Promise<{evidence: Object[], ok: boolean}|{unverifiable: string}>}
    */
   async _collectClawstrEvidence(commitment) {
     const rawPubkey = commitment.pubkey || commitment.platform_profiles?.clawstr;
     if (!rawPubkey) {
-      this._log('No Clawstr pubkey for commitment', commitment.commitment_id);
-      return { evidence: [], ok: true };
+      return { unverifiable: 'no Clawstr pubkey to monitor' };
     }
 
     // Commitments created through the x402 gate already hold hex. Ones written
@@ -332,12 +349,9 @@ class MonitoringService {
     try {
       hexPubkey = clawstrApi.normalizeNostrPubkey(rawPubkey);
     } catch (error) {
-      // Not recoverable by retrying, so report success-with-nothing rather than
-      // a collection failure that would retry this same value every tick.
-      this._log(
-        `Commitment ${commitment.commitment_id} has an unusable Clawstr pubkey: ${error.message}`
-      );
-      return { evidence: [], ok: true };
+      // Not recoverable by retrying, and not the agent's inactivity either:
+      // reporting success-with-nothing here scored it as a `failed` receipt.
+      return { unverifiable: `unusable Clawstr pubkey: ${error.message}` };
     }
 
     const startTs = Math.floor(new Date(commitment.start_date).getTime() / 1000);
