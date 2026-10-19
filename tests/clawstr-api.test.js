@@ -280,4 +280,74 @@ describe('getEventsByAuthor', () => {
 
     await expect(clawstrApi.getEventsByAuthor(HEX)).rejects.toThrow(/author query failed/i);
   });
+
+  describe('paging', () => {
+    // A relay holding the agent's whole history, answering newest-first up to
+    // the limit like a real one does.
+    const relay = history => (cmd, args) => {
+      const until = args.includes('-u') ? Number(args[args.indexOf('-u') + 1]) : Infinity;
+      const limit = Number(args[args.indexOf('-l') + 1]);
+      const page = history
+        .filter(e => e.created_at <= until)
+        .sort((a, b) => b.created_at - a.created_at)
+        .slice(0, limit);
+      return fakeProc({ stdout: page.map(e => event(e.id, e.created_at)).join('\n'), stderr: OK_STDERR });
+    };
+    const history = n => Array.from({ length: n }, (_, i) => ({ id: `e${i}`, created_at: 1000 + i }));
+
+    it('pages backwards until the window is covered instead of dropping the oldest events', async () => {
+      // Previously: one query, newest 500 kept, a warning, the rest gone.
+      spawn.mockImplementation(relay(history(12)));
+
+      const result = await clawstrApi.getEventsByAuthor(HEX, { since: 0, until: 5000, limit: 5 });
+
+      expect(result.events.map(e => e.id)).toEqual(history(12).map(e => e.id));
+      expect(result.truncated).toBe(false);
+      const untils = spawn.mock.calls.map(([, args]) => args[args.indexOf('-u') + 1]);
+      expect(untils).toEqual(['5000', '1007', '1003']);
+    });
+
+    it('stops after one query when the first page is not full', async () => {
+      spawn.mockImplementation(relay(history(3)));
+
+      const result = await clawstrApi.getEventsByAuthor(HEX, { limit: 5 });
+
+      expect(result.events).toHaveLength(3);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('reports truncation when maxPages is reached', async () => {
+      spawn.mockImplementation(relay(history(20)));
+      const warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+
+      const result = await clawstrApi.getEventsByAuthor(HEX, { limit: 5, maxPages: 2 });
+
+      expect(spawn).toHaveBeenCalledTimes(2);
+      expect(result.truncated).toBe(true);
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/still full after 2 pages/));
+      warn.mockRestore();
+    });
+
+    it('stops at since rather than paging past the window', async () => {
+      spawn.mockImplementation(relay(history(20)));
+
+      await clawstrApi.getEventsByAuthor(HEX, { since: 1015, limit: 5 });
+
+      expect(spawn).toHaveBeenCalledTimes(1);
+    });
+
+    it('takes the worst relay health across pages', async () => {
+      const full = relay(history(8));
+      let call = 0;
+      spawn.mockImplementation((cmd, args) => {
+        call++;
+        if (call === 1) return full(cmd, args);
+        return fakeProc({ stdout: event('e0', 1000), stderr: 'connecting to wss://nos.lol... ok.' });
+      });
+
+      const result = await clawstrApi.getEventsByAuthor(HEX, { limit: 5 });
+
+      expect(result.relaysOk).toBe(1);
+    });
+  });
 });

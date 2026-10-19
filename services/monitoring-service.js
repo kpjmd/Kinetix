@@ -12,6 +12,7 @@ const clawstrApi = require('../utils/clawstr-api');
 const dataStore = require('./data-store');
 const rules = require('../config/verification-rules.json');
 const crypto = require('crypto');
+const { isKinetixSelf } = require('../utils/monitoring-target');
 
 // A tick re-reads every commitment JSON file, so an unbounded active set turns
 // each run into an O(all commitments) scan plus one network fetch per item.
@@ -154,6 +155,20 @@ class MonitoringService {
    */
   async checkCommitment(commitment) {
     const platform = commitment.criteria?.platform;
+
+    // Unpaid only: a buyer who paid to verify Kinetix's own npub (the example
+    // handle the paid routes offer) is owed the receipt they bought.
+    if (!commitment.payment && isKinetixSelf({
+      platform,
+      pubkey: commitment.pubkey,
+      handle: commitment.platform_profiles?.[platform]
+    })) {
+      await this.verificationService.closeAsUnverifiable(
+        commitment.commitment_id,
+        'self-verification: Kinetix does not verify its own activity'
+      );
+      return;
+    }
 
     let collected;
     try {

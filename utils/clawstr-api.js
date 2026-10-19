@@ -608,22 +608,83 @@ function pubkeyError(code, message) {
  *   6 unique events). Slicing would discard real evidence.
  * - It bypasses executeNak, whose "stderr mentions ok. and stdout is empty ->
  *   success" branch is exactly the silent under-count described above.
+ * - It pages. Relays answer newest-first up to `limit` each, so one query for
+ *   a prolific agent silently drops the *oldest* part of the window. While a
+ *   page comes back full it re-queries with `until` at the oldest event seen,
+ *   up to `maxPages`; `truncated` says whether that cap still cut the window.
  *
  * @param {string} hexPubkey - 64-char hex author pubkey
  * @param {object} options - { since, until } unix seconds, { limit } per relay,
- *   { timeoutMs, attempts } to bound a caller that is holding a live request
- *   open (the paid route's baseline snapshot) rather than a background tick
- * @returns {Promise<{events: array, relaysOk: number, relaysTotal: number}>}
+ *   { maxPages } bounding the backwards paging, { timeoutMs, attempts } to
+ *   bound a caller that is holding a live request open (the paid route's
+ *   baseline snapshot) rather than a background tick
+ * @returns {Promise<{events: array, relaysOk: number, relaysTotal: number, truncated: boolean}>}
  */
 async function getEventsByAuthor(
   hexPubkey,
-  { since, until, limit = 500, timeoutMs = CONFIG.timeout, attempts = 2 } = {}
+  { since, until, limit = 500, maxPages = 10, timeoutMs = CONFIG.timeout, attempts = 2 } = {}
 ) {
   if (!HEX64.test(hexPubkey || '')) {
     // Guarded before the spawn so a bad value never becomes an argv element.
     throw new Error(`getEventsByAuthor requires a 64-char hex pubkey, got "${hexPubkey}"`);
   }
 
+  const byId = new Map();
+  // Worst page wins: a full answer on page 1 and an outage on page 2 is still
+  // a window we cannot vouch for.
+  let relaysOk = Infinity;
+  let relaysTotal = CONFIG.relays.length;
+  let truncated = false;
+  let pageUntil = until;
+
+  for (let page = 1; ; page++) {
+    const result = await queryAuthorPage(hexPubkey, {
+      since, until: pageUntil, limit, timeoutMs, attempts
+    });
+    relaysOk = Math.min(relaysOk, result.relaysOk);
+    relaysTotal = result.relaysTotal;
+
+    let added = 0;
+    for (const event of result.events) {
+      if (!byId.has(event.id)) {
+        byId.set(event.id, event);
+        added++;
+      }
+    }
+
+    // Below the limit, every relay returned all it had: nothing older remains.
+    // No new ids means the page was entirely overlap, which more pages repeat.
+    if (result.events.length < limit || added === 0) break;
+
+    const oldest = result.events[0].created_at;
+    if (!Number.isFinite(oldest) || (Number.isFinite(since) && oldest <= since)) break;
+
+    if (page >= maxPages) {
+      truncated = true;
+      break;
+    }
+    // Inclusive: events sharing the oldest second may straddle the cut, and
+    // the id dedup above absorbs the overlap.
+    pageUntil = oldest;
+  }
+
+  const events = [...byId.values()].sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
+
+  if (truncated) {
+    console.warn(
+      `[Clawstr] Author query still full after ${maxPages} pages of ${limit} ` +
+      `(${events.length} events); the oldest part of the window may be under-counted`
+    );
+  }
+
+  return { events, relaysOk, relaysTotal, truncated };
+}
+
+/**
+ * One author query, retried. A page that fails every attempt fails the whole
+ * collection rather than returning what earlier pages found.
+ */
+async function queryAuthorPage(hexPubkey, { since, until, limit, timeoutMs, attempts }) {
   const args = ['req', '-k', '1111', '-a', hexPubkey];
   // Only when set: nak renders an unset -s/-u as a 1969 timestamp.
   if (Number.isFinite(since)) args.push('-s', String(Math.floor(since)));
@@ -634,7 +695,7 @@ async function getEventsByAuthor(
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
       const result = await spawnNak(args, timeoutMs);
-      return parseAuthorEvents(result, limit);
+      return parseAuthorEvents(result);
     } catch (error) {
       lastError = error;
       console.error(`[Clawstr] getEventsByAuthor attempt ${attempt}/${attempts} failed: ${error.message}`);
@@ -653,7 +714,7 @@ async function getEventsByAuthor(
  * Turn a nak req result into events plus relay health.
  * Split out from getEventsByAuthor so the parsing is testable without a spawn.
  */
-function parseAuthorEvents(result, limit) {
+function parseAuthorEvents(result) {
   const relaysTotal = CONFIG.relays.length;
   // nak prints one "connecting to <url>... ok." per relay it reached; a failure
   // prints the reason instead, on the same stream, and does not affect the exit
@@ -683,13 +744,6 @@ function parseAuthorEvents(result, limit) {
   }
 
   const events = [...byId.values()].sort((a, b) => (a.created_at || 0) - (b.created_at || 0));
-
-  if (events.length >= limit) {
-    console.warn(
-      `[Clawstr] Author query returned ${events.length} events at limit ${limit}; ` +
-      `the window may be truncated and evidence under-counted`
-    );
-  }
 
   return { events, relaysOk, relaysTotal };
 }
