@@ -60,7 +60,9 @@ async function buildBaseline(commitment, options = {}) {
         since: Math.floor(from / 1000),
         until: Math.floor(now / 1000),
         timeoutMs,
-        attempts: 1
+        attempts: 1,
+        // Each page is another round trip inside the paid response's budget.
+        maxPages: 1
       }),
       timeoutMs + 500
     );

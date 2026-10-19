@@ -231,8 +231,9 @@ describe('MonitoringService.checkAllActive', () => {
 });
 
 describe('MonitoringService Clawstr collection', () => {
-  const NPUB = 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
-  const HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+  // Synthetic: Kinetix's own key would be closed as self-verification.
+  const NPUB = 'npub14w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w46h2at4w4scf6zts';
+  const HEX = 'ab'.repeat(32);
 
   let service;
   let verificationService;
@@ -508,5 +509,48 @@ describe('MonitoringService unmonitorable commitments', () => {
 
     expect(verificationService.addEvidence).toHaveBeenCalledTimes(1);
     expect(verificationService.closeAsUnverifiable).not.toHaveBeenCalled();
+  });
+});
+
+describe('MonitoringService self-verification', () => {
+  const KINETIX_HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+  let service;
+  let verificationService;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    service = new MonitoringService();
+    verificationService = makeVerificationService();
+    service.initialize(verificationService);
+    dataStore.loadCommitment.mockImplementation(async () => makeCommitment({ pubkey: KINETIX_HEX }));
+    dataStore.saveCommitment.mockResolvedValue(undefined);
+    clawstrApi.getEventsByAuthor.mockResolvedValue({ events: [], relaysOk: 3, relaysTotal: 3 });
+  });
+
+  it('closes an unpaid commitment on Kinetix\'s own key without querying relays', async () => {
+    await service.checkCommitment(makeCommitment({ pubkey: KINETIX_HEX }));
+
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalledWith(
+      'cmt_kx_test',
+      expect.stringContaining('self-verification')
+    );
+    expect(clawstrApi.getEventsByAuthor).not.toHaveBeenCalled();
+  });
+
+  it('closes an unpaid Moltbook commitment on Kinetix\'s own profile', async () => {
+    await service.checkCommitment(makeCommitment({
+      criteria: { platform: 'moltbook' },
+      platform_profiles: { moltbook: 'Kinetix' }
+    }));
+
+    expect(verificationService.closeAsUnverifiable).toHaveBeenCalled();
+    expect(moltbookApi.search).not.toHaveBeenCalled();
+  });
+
+  it('still monitors a paid commitment on Kinetix\'s key: the buyer is owed a receipt', async () => {
+    await service.checkCommitment(makeCommitment({ pubkey: KINETIX_HEX, payment: { tier: 'basic' } }));
+
+    expect(verificationService.closeAsUnverifiable).not.toHaveBeenCalled();
+    expect(clawstrApi.getEventsByAuthor).toHaveBeenCalledWith(KINETIX_HEX, expect.anything());
   });
 });
