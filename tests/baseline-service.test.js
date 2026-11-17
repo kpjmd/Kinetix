@@ -29,7 +29,8 @@ describe('buildBaseline', () => {
       since: nowSec - 7 * 24 * HOUR,
       until: nowSec,
       timeoutMs: 5000,
-      attempts: 1
+      attempts: 1,
+      maxPages: 1
     });
   });
 

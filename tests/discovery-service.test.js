@@ -156,4 +156,35 @@ describe('DiscoveryService dedup', () => {
       }));
     });
   });
+
+  describe('self-referential discoveries', () => {
+    const KINETIX_HEX = '304c37f5d924645044258423f4c374bf32a73448b597713eb28699f7833aea55';
+
+    it.each([
+      ['a Clawstr post by Kinetix\'s own key', { source_platform: 'clawstr', agent_id: 'x', agent_pubkey: KINETIX_HEX }],
+      ['a Moltbook post by Kinetix', { source_platform: 'moltbook', agent_id: 'Kinetix' }]
+    ])('skips %s at queue time', async (_label, overrides) => {
+      expect(await discoveryService.addVerificationRequest(makeRequest(overrides))).toBeNull();
+      expect(await discoveryService.addSuggestion(makeRequest(overrides))).toBeNull();
+      expect(await discoveryService.listPending()).toHaveLength(0);
+    });
+
+    it('refuses to approve a self-referential suggestion queued before the filter', async () => {
+      const id = 'disc_legacyself';
+      await fs.writeFile(path.join(tmpDir, 'discovery-queue', `${id}.json`), JSON.stringify({
+        id,
+        status: 'pending',
+        source_platform: 'clawstr',
+        agent_id: KINETIX_HEX,
+        agent_pubkey: KINETIX_HEX,
+        suggested_verification: { verification_type: 'consistency', description: 'd', criteria: {} }
+      }));
+      const createVerification = jest.fn();
+      discoveryService.initialize({ createVerification }, null);
+
+      await expect(discoveryService.approveSuggestion(id, 'kinetix_autonomous'))
+        .rejects.toThrow(/about Kinetix itself/);
+      expect(createVerification).not.toHaveBeenCalled();
+    });
+  });
 });

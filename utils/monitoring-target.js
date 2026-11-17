@@ -14,6 +14,7 @@
 
 const { ValidationError } = require('./validation-error');
 const { normalizeNostrPubkey } = require('./clawstr-api');
+const agentConfig = require('../config/agent.json');
 
 // Platforms with a collector that can actually attribute evidence to one agent.
 //
@@ -40,6 +41,39 @@ const COLLECTOR_PLATFORMS = ['moltbook', 'clawstr'];
 // service a non-empty baseline. Kept here, beside the only parser it must
 // satisfy, so an example that stops decoding fails this module's tests.
 const EXAMPLE_CLAWSTR_HANDLE = 'npub1xpxr0awey3j9q3p9ss3lfsm5hue2wdzgkkthz04js6vl0qe6af2s39ufc5';
+
+let kinetixClawstrHex;
+
+/**
+ * Whether an identity is Kinetix itself.
+ *
+ * Heartbeat discovery scans feeds that include Kinetix's own replies, and
+ * nothing filtered them out, so Kinetix kept approving commitments to verify
+ * itself: receipts and announcements about its own activity, and a slot in
+ * every capped monitoring batch.
+ *
+ * @param {{platform: string, pubkey?: string, handle?: string}} identity
+ */
+function isKinetixSelf({ platform, pubkey, handle }) {
+  if (platform === 'clawstr') {
+    // Lazy: tests that mock clawstr-api wholesale load this module too.
+    if (kinetixClawstrHex === undefined) {
+      try { kinetixClawstrHex = normalizeNostrPubkey(EXAMPLE_CLAWSTR_HANDLE); } catch (e) { kinetixClawstrHex = null; }
+    }
+    for (const candidate of [pubkey, handle]) {
+      if (!candidate || !kinetixClawstrHex) continue;
+      try {
+        if (normalizeNostrPubkey(candidate) === kinetixClawstrHex) return true;
+      } catch (e) { /* not a key, so not ours */ }
+    }
+    return false;
+  }
+  if (platform === 'moltbook') {
+    return typeof handle === 'string' &&
+      handle.trim().toLowerCase() === agentConfig.name.toLowerCase();
+  }
+  return false;
+}
 
 const HANDLE_EXPECTED =
   'The agent\'s Nostr public key: an npub (starts with "npub1", exactly 63 characters) ' +
@@ -137,5 +171,6 @@ module.exports = {
   resolveMonitoringTarget,
   SUPPORTED_PLATFORMS,
   COLLECTOR_PLATFORMS,
-  EXAMPLE_CLAWSTR_HANDLE
+  EXAMPLE_CLAWSTR_HANDLE,
+  isKinetixSelf
 };

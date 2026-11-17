@@ -4,7 +4,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const dataStore = require('./data-store');
-const { COLLECTOR_PLATFORMS } = require('../utils/monitoring-target');
+const { COLLECTOR_PLATFORMS, isKinetixSelf } = require('../utils/monitoring-target');
 const { ValidationError } = require('../utils/validation-error');
 
 const DISCOVERY_DIR = path.join(process.env.DATA_DIR || path.join(__dirname, '../data'), 'discovery-queue');
@@ -48,6 +48,8 @@ class DiscoveryService {
    * Creates a suggestion with source_type: 'explicit_request'
    */
   async addVerificationRequest(request) {
+    if (this._isSelf(request)) return null;
+
     // Build dedup key
     const agentId = (request.agent_id || '').toLowerCase().trim();
     const normalizedClaim = (request.normalized_claim || request.claim_text || '').toLowerCase().trim();
@@ -106,6 +108,8 @@ class DiscoveryService {
    * Deduplicates by agent_id + normalized_claim
    */
   async addSuggestion(discovery) {
+    if (this._isSelf(discovery)) return null;
+
     // Build dedup key
     const agentId = (discovery.agent_id || '').toLowerCase().trim();
     const normalizedClaim = (discovery.normalized_claim || discovery.claim_text || '').toLowerCase().trim();
@@ -153,6 +157,20 @@ class DiscoveryService {
     await this._notifyAdmin(suggestion);
 
     return suggestion;
+  }
+
+  /**
+   * Kinetix's own posts are in the feeds the heartbeat scans. Its replies read
+   * like commitments, and an "explicit request" is always auto-approved.
+   */
+  _isSelf(entry) {
+    const self = isKinetixSelf({
+      platform: entry.source_platform,
+      pubkey: entry.agent_pubkey,
+      handle: entry.agent_id
+    });
+    if (self) this._log(`Skipped self-referential discovery: ${entry.claim_text || entry.normalized_claim || ''}`.slice(0, 200));
+    return self;
   }
 
   /**
@@ -279,6 +297,11 @@ class DiscoveryService {
    * the suggestion stays pending for a human instead.
    */
   _monitorableCriteria(suggestion) {
+    // Suggestions queued before the add-time filter existed.
+    if (this._isSelf(suggestion)) {
+      throw new ValidationError(`Suggestion ${suggestion.id} is about Kinetix itself`);
+    }
+
     const criteria = { ...(suggestion.suggested_verification?.criteria || {}) };
     if (!criteria.platform) criteria.platform = suggestion.source_platform;
 
